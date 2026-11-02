@@ -86,8 +86,15 @@ fun ParametersScreen(
                             containerColor = MaterialTheme.colorScheme.surfaceVariant
                         )
                     ) {
+                        // Если единица задана и не равна "*" — показываем "Имя, ед".
+                        // "*" в INI-файле означает "единица отсутствует".
+                        val label = if (param.unit.isNotBlank() && param.unit != "*") {
+                            "${param.name}, ${param.unit}"
+                        } else {
+                            param.name
+                        }
                         Text(
-                            text = param.name,
+                            text = label,
                             fontWeight = FontWeight.Bold,
                             fontSize = 14.sp,
                             modifier = Modifier.padding(12.dp)

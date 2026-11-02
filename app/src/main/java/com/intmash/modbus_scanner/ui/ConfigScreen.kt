@@ -56,7 +56,7 @@ fun ConfigScreen(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Button(onClick = onRefreshIdClick) {
+                Button(onClick = onRefreshIdClick, shape = RoundedCornerShape(10.dp)) {
                     Text("ID", fontSize = 16.sp, fontWeight = FontWeight.Bold)
                 }
 
