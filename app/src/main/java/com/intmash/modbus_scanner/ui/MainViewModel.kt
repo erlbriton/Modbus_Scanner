@@ -18,6 +18,13 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+/**
+ * MainViewModel — модель представления уровня Activity.
+ *
+ * Хранит состояние подключения к USB-контроллеру и список страниц,
+ * полученных из выбранного INI-файла. Все блокирующие операции (USB-обмен)
+ * выполняются на Dispatchers.IO.
+ */
 class MainViewModel : ViewModel() {
 
     private val repository = ModbusRepository()
@@ -31,12 +38,7 @@ class MainViewModel : ViewModel() {
     var pages by mutableStateOf<List<PageInfo>>(emptyList())
         private set
 
-    var selectedPage by mutableStateOf<PageInfo?>(null)
-        private set
-
     private var pollingJob: Job? = null
-
-    // Защита от параллельных initializeAndConnect (attachReceiver + onResume могут сработать одновременно)
     private var isInitializing = false
 
     fun initializeAndConnect(usbManager: UsbManager, device: UsbDevice) {
@@ -62,7 +64,6 @@ class MainViewModel : ViewModel() {
                         deviceId = "Порт открыт. Чтение ID..."
                         startPolling(needReopen = false)
                     } else {
-                        // Явный сброс, чтобы fallback в onResume сработал при следующей попытке
                         isConnected = false
                         deviceId = "Ошибка openPort (см. лог)"
                     }
@@ -73,11 +74,6 @@ class MainViewModel : ViewModel() {
         }
     }
 
-    /**
-     * Проверяет, относится ли устройство к тому, с которым мы сейчас работаем.
-     * Нужно, чтобы attachReceiver реагировал только на отключение НАШЕГО устройства,
-     * а не любого USB в системе.
-     */
     fun isOurDevice(device: UsbDevice): Boolean {
         return repository.getCurrentDeviceName() == device.deviceName
     }
@@ -90,13 +86,6 @@ class MainViewModel : ViewModel() {
     fun loadIniFile(context: android.content.Context, uri: Uri) {
         val parser = com.intmash.modbus_scanner.data.IniParser()
         pages = parser.parsePages(context, uri)
-        if (pages.isNotEmpty()) {
-            selectedPage = pages.first()
-        }
-    }
-
-    fun selectPage(page: PageInfo) {
-        selectedPage = page
     }
 
     private fun startPolling(needReopen: Boolean) {
@@ -148,11 +137,6 @@ class MainViewModel : ViewModel() {
         repository.close()
     }
 
-    /**
-     * Полное завершение работы: сброс состояния и закрытие порта.
-     * ВАЖНО: сбрасываем isConnected — иначе onResume fallback не сработает
-     * при повторном подключении контроллера.
-     */
     fun shutdown() {
         pollingJob?.cancel()
         pollingJob = null

@@ -4,103 +4,197 @@ import android.content.Context
 import android.net.Uri
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.nio.charset.Charset
 
 /**
- * PageInfo — модель данных (Data Class), описывающая одну страницу параметров,
- * прочитанную из секции [PAGES] конфигурационного INI-файла.
+ * ParameterInfo — описание одного параметра из секций [RAM], [FLASH], [CD] INI-файла.
  *
- * В Kotlin ключевое слово `data class` автоматически генерирует для класса полезные методы:
- * toString(), equals(), hashCode() и copy(), что избавляет от написания шаблонного кода.
+ * Формат строки в INI (общий вид — name/desc/type/address/register/unit/...):
+ *   p201 = Uref/Напряжение задания/TWORD/x0008/r0004/V/FracDecScale/2/0/
+ *   p1   = flash_error/описание/TBit/x0000/1/r0000.0/0/1/0/
  *
- * @property id Уникальный идентификатор страницы (например, "p1000").
- * @property title Человекочитаемое название страницы, отображаемое в меню (например, "Основные данные").
- * @property parameters Список параметров (тегов или адресов регистров), принадлежащих этой странице.
+ * Общие поля:
+ *   - key         — внутренний ID (например, "p201")
+ *   - name        — имя параметра (используется в [PAGES])
+ *   - description — человекочитаемое описание
+ *   - type        — тип данных (TBit, TWORD, TDWORD, TByte, TFloat, TPrmList)
+ *   - address     — внутренний адрес контроллера (x0008)
+ *   - register    — Modbus-адрес (r0004 или r0000.0 для бита)
+ *   - unit        — единица измерения (может быть пустой)
+ *
+ * Остальные поля (масштаб, размер, значение по умолчанию, список и т.д.)
+ * не используются при отображении, но сохраняются в [rawFields] для будущего
+ * чтения/записи.
+ */
+data class ParameterInfo(
+    val key: String,
+    val name: String,
+    val description: String,
+    val type: String,
+    val address: String,
+    val register: String,
+    val unit: String,
+    val rawFields: List<String>
+)
+
+/**
+ * Ссылка на параметр внутри страницы [PAGES]: "RAM:Uref" → PageParameterRef("RAM", "Uref").
+ */
+data class PageParameterRef(
+    val section: String,
+    val name: String
+)
+
+/**
+ * PageInfo — модель страницы из секции [PAGES].
+ * Параметры уже разрешены: каждой ссылке сопоставлен [ParameterInfo] из соответствующей
+ * секции INI-файла. Несуществующие параметры просто отбрасываются.
  */
 data class PageInfo(
     val id: String,
     val title: String,
-    val parameters: List<String>
+    val parameters: List<ParameterInfo>
 )
 
 /**
- * IniParser — класс, реализующий логику парсинга текстовых конфигурационных файлов формата INI.
+ * IniParser — парсер INI-файла конфигурации контроллера.
+ * Читает секцию [PAGES] и секции с параметрами ([RAM], [FLASH], [CD] и любые другие,
+ * кроме [DEVICE], [EVENTS], [VARS]), возвращает список страниц с разрешёнными параметрами.
  */
 class IniParser {
 
-    /**
-     * Читает INI-файл по его URI и извлекает список страниц из секции [PAGES].
-     *
-     * @param context Контекст приложения для доступа к ContentResolver.
-     * @param uri Ссылка на выбранный пользователем файл в памяти устройства.
-     * @return Список объектов [PageInfo], найденных в файле. В случае ошибки возвращает пустой список.
-     */
     fun parsePages(context: Context, uri: Uri): List<PageInfo> {
-        val pages = mutableListOf<PageInfo>()
+        val pagesRaw = mutableListOf<Triple<String, String, List<PageParameterRef>>>()
+        val parametersBySection = mutableMapOf<String, MutableMap<String, ParameterInfo>>()
 
         try {
-            // Открываем потоковое чтение файла через системный ContentResolver
             context.contentResolver.openInputStream(uri)?.use { inputStream ->
-                // ⚠️ ВАЖНО: Используем кодировку "Windows-1251", так как промышленные INI-файлы
-                // часто содержат кириллицу в старой кодировке. Чтение через UTF-8 привело бы к "кракозябрам".
-                BufferedReader(InputStreamReader(inputStream, java.nio.charset.Charset.forName("Windows-1251"))).use { reader ->
+                BufferedReader(InputStreamReader(inputStream, Charset.forName("Windows-1251"))).use { reader ->
                     var currentSection = ""
                     var line: String? = reader.readLine()
 
-                    // Построчно читаем файл до конца (пока строка не станет равной null)
                     while (line != null) {
-                        val trimmed = line.trim() // Убираем лишние пробелы по краям строки
+                        val trimmed = line.trim()
 
-                        // 1. Проверяем, является ли строка заголовком секции (например, [PAGES] или [RAM])
-                        if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
-                            // Вырезаем имя секции без квадратных скобок (например, из "[PAGES]" получаем "PAGES")
-                            currentSection = trimmed.substring(1, trimmed.length - 1)
-                        }
-                        // 2. Если мы находимся внутри секции [PAGES] и строка содержит знак равенства ('=')
-                        else if (currentSection.equals("PAGES", ignoreCase = true) && trimmed.contains("=")) {
-                            // Разделяем строку на две части по знаку '=' (максимум на 2 части)
-                            val parts = trimmed.split("=", limit = 2)
-                            if (parts.size == 2) {
-                                val pageId = parts[0].trim()   // Ключ (например, p1000)
-                                val valuePart = parts[1].trim() // Значение (например, "Основные данные/param1,param2/")
-
-                                // Формат строки в INI: Название/параметр1,параметр2,.../
-                                // Разбиваем значение на части по символу '/' (максимум на 3 части)
-                                val subParts = valuePart.split("/", limit = 3)
-
-                                // Извлекаем читаемое название (первая часть до слэша).
-                                // Если название пустое, в качестве фоллбека используем pageId.
-                                val title = if (subParts.isNotEmpty() && subParts[0].isNotBlank()) {
-                                    subParts[0].trim()
-                                } else {
-                                    pageId
+                        when {
+                            trimmed.startsWith("[") && trimmed.endsWith("]") -> {
+                                currentSection = trimmed.substring(1, trimmed.length - 1).uppercase()
+                            }
+                            trimmed.isEmpty() || trimmed.startsWith(";") -> {
+                                // пропускаем пустые строки и комментарии
+                            }
+                            trimmed.contains("=") -> {
+                                when (currentSection) {
+                                    "PAGES" -> parsePageLine(trimmed)?.let { pagesRaw.add(it) }
+                                    "DEVICE", "EVENTS", "VARS" -> {
+                                        // не параметры
+                                    }
+                                    else -> {
+                                        if (currentSection.isNotEmpty()) {
+                                            val param = parseParameterLine(trimmed)
+                                            if (param != null) {
+                                                parametersBySection
+                                                    .getOrPut(currentSection) { mutableMapOf() }[param.name] = param
+                                            }
+                                        }
+                                    }
                                 }
-
-                                // Извлекаем сырую строку с параметрами (находится между первым и вторым слэшами)
-                                val rawParams = if (subParts.size > 1) subParts[1] else ""
-
-                                // Если строка с параметрами не пустая, разбиваем её по запятой ','
-                                // и очищаем каждый элемент от пробелов
-                                val params = if (rawParams.isNotBlank()) {
-                                    rawParams.split(",").map { it.trim() }.filter { it.isNotEmpty() }
-                                } else {
-                                    emptyList()
-                                }
-
-                                // Создаем объект PageInfo и добавляем его в общий список страниц
-                                pages.add(PageInfo(pageId, title, params))
                             }
                         }
 
-                        // Читаем следующую строку
                         line = reader.readLine()
                     }
                 }
             }
         } catch (e: Exception) {
-            // Логируем или выводим стек ошибки, если файл поврежден или недоступен
             e.printStackTrace()
+            return emptyList()
         }
 
-        return pages
+        return pagesRaw.map { (id, title, refs) ->
+            val params = refs.mapNotNull { ref ->
+                parametersBySection[ref.section]?.get(ref.name)
+            }
+            PageInfo(id, title, params)
+        }
+    }
+
+    private fun parsePageLine(line: String): Triple<String, String, List<PageParameterRef>>? {
+        val parts = line.split("=", limit = 2)
+        if (parts.size != 2) return null
+
+        val pageId = parts[0].trim()
+        val valuePart = parts[1].trim()
+
+        val subParts = valuePart.split("/", limit = 3)
+        val title = if (subParts.isNotEmpty() && subParts[0].isNotBlank()) {
+            subParts[0].trim()
+        } else {
+            pageId
+        }
+
+        val rawParams = if (subParts.size > 1) subParts[1] else ""
+
+        val refs = if (rawParams.isNotBlank()) {
+            rawParams.split(",").mapNotNull { raw ->
+                val trimmed = raw.trim()
+                val idx = trimmed.indexOf(":")
+                if (idx < 0) null
+                else {
+                    val section = trimmed.substring(0, idx).trim().uppercase()
+                    val name = trimmed.substring(idx + 1).trim()
+                    if (section.isNotEmpty() && name.isNotEmpty()) {
+                        PageParameterRef(section, name)
+                    } else null
+                }
+            }
+        } else {
+            emptyList()
+        }
+
+        return Triple(pageId, title, refs)
+    }
+
+    private fun parseParameterLine(line: String): ParameterInfo? {
+        val parts = line.split("=", limit = 2)
+        if (parts.size != 2) return null
+
+        val key = parts[0].trim()
+        val valuePart = parts[1].trim()
+
+        val fields = valuePart.split("/")
+        if (fields.size < 4) return null
+
+        val name = fields.getOrElse(0) { "" }.trim()
+        if (name.isEmpty()) return null
+
+        val description = fields.getOrElse(1) { "" }.trim()
+        val type = fields.getOrElse(2) { "" }.trim()
+
+        return if (type.equals("TBit", ignoreCase = true)) {
+            // name/desc/TBit/addr/bit/reg/...
+            ParameterInfo(
+                key = key,
+                name = name,
+                description = description,
+                type = type,
+                address = fields.getOrElse(3) { "" }.trim(),
+                register = fields.getOrElse(5) { "" }.trim(),
+                unit = "",
+                rawFields = fields.drop(6)
+            )
+        } else {
+            // name/desc/type/addr/reg/unit/...
+            ParameterInfo(
+                key = key,
+                name = name,
+                description = description,
+                type = type,
+                address = fields.getOrElse(3) { "" }.trim(),
+                register = fields.getOrElse(4) { "" }.trim(),
+                unit = fields.getOrElse(5) { "" }.trim(),
+                rawFields = fields.drop(6)
+            )
+        }
     }
 }

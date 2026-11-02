@@ -4,11 +4,7 @@ import kotlinx.serialization.Serializable
 
 /**
  * Типобезопасные маршруты приложения.
- *
- * Каждый экран — это @Serializable объект (без аргументов) или data class (с аргументами).
- * Благодаря этому компилятор проверяет типы аргументов и названия экранов.
- *
- * Для расширения: добавляйте новые @Serializable объекты/классы сюда.
+ * Для каждого экрана — либо data object (без аргументов), либо data class (с аргументами).
  */
 @Serializable
 data object SplashRoute
@@ -21,3 +17,6 @@ data object FileBrowserRoute
 
 @Serializable
 data class ConfigRoute(val selectedFileName: String)
+
+@Serializable
+data class ParametersRoute(val pageId: String)

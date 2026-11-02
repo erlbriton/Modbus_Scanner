@@ -5,6 +5,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.Settings
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -21,16 +22,13 @@ import com.intmash.modbus_scanner.ui.ConfigScreen
 import com.intmash.modbus_scanner.ui.FileBrowserScreen
 import com.intmash.modbus_scanner.ui.MainScreen
 import com.intmash.modbus_scanner.ui.MainViewModel
+import com.intmash.modbus_scanner.ui.ParametersScreen
 import com.intmash.modbus_scanner.ui.SplashScreen
 import kotlinx.coroutines.delay
 
 /**
  * Корневой NavHost приложения.
- *
- * Связывает типобезопасные маршруты (см. AppDestinations.kt) с Composable-экранами.
- * @param viewModel Общая ViewModel, живущая на уровне Activity.
- * @param isVirtualDevice Флаг виртуального устройства.
- * @param activityContext Контекст Activity для запуска системных настроек.
+ * Связывает типобезопасные маршруты с Composable-экранами.
  */
 @Composable
 fun AppNavHost(
@@ -47,10 +45,9 @@ fun AppNavHost(
         startDestination = SplashRoute,
         modifier = modifier
     ) {
-        // --- 1. Экран заставки ---
+        // --- 1. Заставка ---
         composable<SplashRoute> {
             SplashScreen()
-
             LaunchedEffect(Unit) {
                 delay(3000)
                 navController.navigate(MainRoute) {
@@ -66,7 +63,6 @@ fun AppNavHost(
                 isConnected = viewModel.isConnected,
                 isVirtualDevice = isVirtualDevice,
                 onSelectFileClick = {
-                    // Android 11+: сначала запрашиваем разрешение на все файлы
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
                         !Environment.isExternalStorageManager()
                     ) {
@@ -92,8 +88,6 @@ fun AppNavHost(
                 onFileSelected = { file ->
                     val uri = Uri.fromFile(file)
                     errorMessage = null
-
-                    // Загружаем INI-файл в ViewModel и переходим на экран конфигурации
                     viewModel.loadIniFile(activityContext, uri)
                     navController.navigate(ConfigRoute(file.name))
                 },
@@ -101,19 +95,32 @@ fun AppNavHost(
             )
         }
 
-        // --- 4. Экран конфигурации ---
+        // --- 4. Меню страниц ---
         composable<ConfigRoute> { backStackEntry ->
-            // Типобезопасно извлекаем аргументы маршрута
             val route: ConfigRoute = backStackEntry.toRoute()
-
             ConfigScreen(
                 deviceId = viewModel.deviceId,
                 selectedFileName = route.selectedFileName,
                 pages = viewModel.pages,
-                selectedPage = viewModel.selectedPage,
                 onRefreshIdClick = { viewModel.refreshDeviceId() },
-                onPageSelected = { page -> viewModel.selectPage(page) }
+                onPageClick = { page ->
+                    navController.navigate(ParametersRoute(pageId = page.id))
+                }
             )
+        }
+
+        // --- 5. Экран параметров выбранной страницы ---
+        composable<ParametersRoute> { backStackEntry ->
+            val route: ParametersRoute = backStackEntry.toRoute()
+            val page = viewModel.pages.find { it.id == route.pageId }
+            if (page != null) {
+                ParametersScreen(
+                    page = page,
+                    onBack = { navController.popBackStack() }
+                )
+            } else {
+                Text("Страница не найдена")
+            }
         }
     }
 }

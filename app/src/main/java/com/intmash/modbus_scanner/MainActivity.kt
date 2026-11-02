@@ -74,6 +74,6 @@ class MainActivity : ComponentActivity() {
     }
 
     companion object {
-        private const val IS_VIRTUAL_DEVICE = false
+        private const val IS_VIRTUAL_DEVICE = true
     }
 }
