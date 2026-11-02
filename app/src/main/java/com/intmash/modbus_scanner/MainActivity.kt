@@ -13,6 +13,7 @@ import android.os.Bundle
 import android.os.Environment
 import android.provider.Settings
 import android.util.Log
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -35,34 +36,61 @@ import com.intmash.modbus_scanner.ui.theme.ModbusIDTheme
 import kotlinx.coroutines.delay
 import java.io.File
 
-/**
- * MainActivity — главная точка входа приложения Android.
- * Наследуется от ComponentActivity, что дает полную поддержку Jetpack Compose и Lifecycle-aware компонентов.
- */
 class MainActivity : ComponentActivity() {
 
-    // Делегат `by viewModels()` связывает ViewModel с жизненным циклом Activity.
     private val viewModel: MainViewModel by viewModels()
-
-    // Системный сервис Android для работы с подключенными по USB устройствами (USB Host Mode)
     private lateinit var usbManager: UsbManager
 
-    /**
-     * BroadcastReceiver — приемник системных широковещательных сообщений.
-     * Отвечает за обработку ответа от пользователя на запрос прав доступа к USB.
-     */
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            Log.d("DEBUG", "onReceive вызван с action: ${intent.action}")
+            Log.e("USB", "usbReceiver.onReceive: action=${intent.action}")
 
             if (ACTION_USB_PERMISSION == intent.action) {
+                val grantedFromExtra = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
+
                 synchronized(this) {
                     val device = IntentCompat.getParcelableExtra(intent, UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+                    Log.e("USB", "device из интента: $device")
 
-                    if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
-                        device?.let { viewModel.initializeAndConnect(usbManager, it) }
+                    if (device == null) {
+                        Log.e("USB", "device == null в броадкасте")
+                        return
+                    }
+
+                    val actuallyGranted = usbManager.hasPermission(device)
+                    Log.e("USB", "EXTRA_PERMISSION_GRANTED=$grantedFromExtra, hasPermission=$actuallyGranted")
+
+                    Toast.makeText(context, "Разрешение: extra=$grantedFromExtra, sys=$actuallyGranted", Toast.LENGTH_LONG).show()
+
+                    if (grantedFromExtra || actuallyGranted) {
+                        Log.e("USB", "Разрешение есть — запускаю initializeAndConnect")
+                        viewModel.initializeAndConnect(usbManager, device)
                     } else {
-                        Log.e("USB", "Доступ к устройству отклонен пользователем")
+                        Log.e("USB", "Доступ отклонен пользователем (hasPermission=false)")
+                    }
+                }
+            }
+        }
+    }
+
+    private val attachReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.action) {
+                UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
+                    val device = IntentCompat.getParcelableExtra(intent, UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+                    Log.e("USB", "ACTION_USB_DEVICE_ATTACHED: $device")
+                    Toast.makeText(context, "Контроллер подключен", Toast.LENGTH_SHORT).show()
+                    checkUsbDevices()
+                }
+                UsbManager.ACTION_USB_DEVICE_DETACHED -> {
+                    val device = IntentCompat.getParcelableExtra(intent, UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+                    Log.e("USB", "ACTION_USB_DEVICE_DETACHED: $device")
+
+                    // Реагируем только на отключение НАШЕГО устройства.
+                    // Если вынуть флешку из OTG-хаба — не должны терять связь с контроллером.
+                    if (device != null && viewModel.isOurDevice(device)) {
+                        Toast.makeText(context, "Контроллер отключен", Toast.LENGTH_SHORT).show()
+                        viewModel.shutdown()
                     }
                 }
             }
@@ -71,33 +99,35 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        // Включает отображение контента "от края до края" (под строкой состояния и навигационной панелью)
         enableEdgeToEdge()
 
-        // Получаем доступ к системной службе управления USB
         usbManager = getSystemService(USB_SERVICE) as UsbManager
 
-        // Сканируем USB-порт при старте приложения
+        // RECEIVER_EXPORTED — иначе системные броадкасты (в т.ч. ответ на USB-разрешение)
+        // на Android 12+/MIUI не доставляются.
+        val permissionFilter = IntentFilter(ACTION_USB_PERMISSION)
+        ContextCompat.registerReceiver(this, usbReceiver, permissionFilter, ContextCompat.RECEIVER_EXPORTED)
+
+        val attachFilter = IntentFilter().apply {
+            addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
+            addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
+        }
+        ContextCompat.registerReceiver(this, attachReceiver, attachFilter, ContextCompat.RECEIVER_EXPORTED)
+
         checkUsbDevices()
 
-        // setContent определяет UI приложения с помощью декларативного фреймворка Jetpack Compose
         setContent {
-            // Применяем общую тему оформления (Material3)
             ModbusIDTheme {
-
                 var showSplash by remember { mutableStateOf(true) }
                 var selectedFileUri by remember { mutableStateOf<Uri?>(null) }
                 var selectedFileName by remember { mutableStateOf<String?>(null) }
                 var errorMessage by remember { mutableStateOf<String?>(null) }
 
-                // Состояния для собственного встроенного файлового браузера
                 val context = this
                 var showFileBrowser by remember { mutableStateOf(false) }
                 var currentDir by remember { mutableStateOf(Environment.getExternalStorageDirectory()) }
                 var fileList by remember { mutableStateOf<List<File>>(emptyList()) }
 
-                // Функция обновления списка файлов и папок в текущей директории
                 fun refreshFiles(dir: File) {
                     try {
                         if (dir.exists() && dir.isDirectory) {
@@ -110,21 +140,16 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                // LaunchedEffect выполняется один раз при старте Composable-функции в контексте корутины.
-                // Задает задержку в 3 секунды для показа стартового сплеш-скрина.
                 LaunchedEffect(Unit) {
                     delay(3000)
                     showSplash = false
                 }
 
-                // Scaffold — базовая каркасная структура Material Design, обеспечивающая правильные отступы (innerPadding)
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     when {
-                        // 1. Показываем заставку при запуске
                         showSplash -> {
                             SplashScreen(modifier = Modifier.padding(innerPadding))
                         }
-                        // 2. Экран собственного файлового браузера (выбор любой папки и файла)
                         showFileBrowser -> {
                             Column(
                                 modifier = Modifier
@@ -139,7 +164,6 @@ class MainActivity : ComponentActivity() {
                                 )
                                 Spacer(modifier = Modifier.height(8.dp))
 
-                                // Кнопка возврата в родительскую папку
                                 if (currentDir.parentFile != null) {
                                     Button(
                                         onClick = {
@@ -155,7 +179,6 @@ class MainActivity : ComponentActivity() {
                                     Spacer(modifier = Modifier.height(8.dp))
                                 }
 
-                                // Список папок и файлов
                                 LazyColumn(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -208,14 +231,12 @@ class MainActivity : ComponentActivity() {
                                 }
                             }
                         }
-                        // 3. Главный экран (до выбора файла)
                         selectedFileName == null -> {
                             MainScreen(
                                 deviceId = viewModel.deviceId,
                                 isConnected = viewModel.isConnected,
                                 isVirtualDevice = IS_VIRTUAL_DEVICE,
                                 onSelectFileClick = {
-                                    // На Android 11+ запрашиваем разрешение на полный доступ к файлам
                                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
                                         !Environment.isExternalStorageManager()) {
                                         try {
@@ -235,7 +256,6 @@ class MainActivity : ComponentActivity() {
                                 modifier = Modifier.padding(innerPadding)
                             )
                         }
-                        // 4. После успешного выбора INI-файла переходим на экран меню и таблицы параметров
                         else -> {
                             ConfigScreen(
                                 deviceId = viewModel.deviceId,
@@ -257,46 +277,71 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /**
-     * Проверяет список подключенных USB-устройств.
-     */
-    private fun checkUsbDevices() {
-        val deviceList = usbManager.deviceList
-        if (deviceList.isEmpty()) {
-            Log.e("USB", "Нет доступных USB-устройств")
-        } else {
+    override fun onResume() {
+        super.onResume()
+        // Fallback: если системный броадкаст ACTION_USB_PERMISSION не дошёл,
+        // но разрешение у нас есть — подхватываем и запускаем подключение.
+        if (!viewModel.isConnected) {
+            val deviceList = usbManager.deviceList
             for (device in deviceList.values) {
-                Log.d("USB", "Найдено устройство: ${device.deviceName}, VendorId: ${device.vendorId}, ProductId: ${device.productId}")
-
                 if (usbManager.hasPermission(device)) {
+                    Log.e("USB", "onResume fallback: разрешение есть для $device")
                     viewModel.initializeAndConnect(usbManager, device)
-                } else {
-                    val permissionIntent = PendingIntent.getBroadcast(
-                        this, 0, Intent(ACTION_USB_PERMISSION), PendingIntent.FLAG_IMMUTABLE
-                    )
-                    usbManager.requestPermission(device, permissionIntent)
+                    break
                 }
             }
         }
-
-        val filter = IntentFilter(ACTION_USB_PERMISSION)
-        ContextCompat.registerReceiver(this, usbReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
     }
 
-    /**
-     * Очистка ресурсов при уничтожении Activity.
-     */
+    private fun checkUsbDevices() {
+        val deviceList = usbManager.deviceList
+        Log.e("USB", "checkUsbDevices(): найдено устройств — ${deviceList.size}")
+        Toast.makeText(this, "Сканирование USB: найдено ${deviceList.size}", Toast.LENGTH_SHORT).show()
+
+        if (deviceList.isEmpty()) {
+            Log.e("USB", "Нет доступных USB-устройств")
+            return
+        }
+
+        for (device in deviceList.values) {
+            Log.e("USB", "Найдено устройство: ${device.deviceName}, VendorId: ${device.vendorId}, ProductId: ${device.productId}")
+
+            if (usbManager.hasPermission(device)) {
+                Log.e("USB", "Разрешение уже есть, инициализируем подключение")
+                viewModel.initializeAndConnect(usbManager, device)
+            } else {
+                Log.e("USB", "Разрешения нет, запрашиваем у пользователя")
+
+                val requestCode = (device.deviceId.hashCode() and 0xFFFF)
+
+                val permissionIntent = PendingIntent.getBroadcast(
+                    this,
+                    requestCode,
+                    Intent(ACTION_USB_PERMISSION),
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                )
+                usbManager.requestPermission(device, permissionIntent)
+            }
+        }
+    }
+
     override fun onDestroy() {
-        super.onDestroy()
         try {
             unregisterReceiver(usbReceiver)
         } catch (e: Exception) {
             Log.e("USB", "Ошибка при отписке ресивера: ${e.message}")
         }
+        try {
+            unregisterReceiver(attachReceiver)
+        } catch (e: Exception) {
+            Log.e("USB", "Ошибка при отписке attach-ресивера: ${e.message}")
+        }
+        viewModel.shutdown()
+        super.onDestroy()
     }
 
     companion object {
         private const val ACTION_USB_PERMISSION = "com.intmash.modbus_scanner.USB_PERMISSION"
-        private const val IS_VIRTUAL_DEVICE = true
+        private const val IS_VIRTUAL_DEVICE = false
     }
 }

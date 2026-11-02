@@ -6,35 +6,34 @@ import android.hardware.usb.UsbManager
 import android.util.Log
 import com.hoho.android.usbserial.driver.UsbSerialPort
 import com.hoho.android.usbserial.driver.UsbSerialProber
+import java.io.ByteArrayOutputStream
 
-/**
- * ModbusRepository — класс-репозиторий, отвечающий за всю низкоуровневую работу
- * с железом: обнаружение USB-устройств, открытие последовательного порта (UART),
- * настройку параметров обмена и отправку/прием запросов по протоколу Modbus RTU.
- *
- * В архитектуре MVVM репозиторий выступает единым источником данных и избавляет
- * ViewModel от необходимости знать детали работы с железом (USB, байты, CRC).
- */
 class ModbusRepository {
 
-    // Ссылка на активный USB-последовательный порт.
-    // Использует стороннюю библиотеку usb-serial-for-android для работы с UART-чипами (CP210x, CH340, FTDI и др.).
     private var usbPort: UsbSerialPort? = null
+    private var usbConnection: UsbDeviceConnection? = null
+
+    private var currentManager: UsbManager? = null
+    private var currentDevice: UsbDevice? = null
 
     /**
-     * Открывает и настраивает USB-порт для связи с контроллером.
-     *
-     * @param usbManager Системный менеджер USB Android.
-     * @param device Обнаруженное физическое USB-устройство.
-     * @return Возвращает true, если порт успешно открыт и настроен, иначе false.
+     * Возвращает deviceName текущего открытого устройства или null.
+     * Используется для проверки, что detach пришёл именно для нашего устройства.
+     * deviceName — стабильное имя физического порта (например, "/dev/bus/usb/001/002"),
+     * в отличие от deviceId (Int), которое может меняться.
      */
+    fun getCurrentDeviceName(): String? = currentDevice?.deviceName
+
     fun openPort(usbManager: UsbManager, device: UsbDevice): Boolean {
-        // Обязательно закрываем предыдущее соединение перед открытием нового,
-        // чтобы избежать зависания порта и утечки ресурсов при повторных подключениях
+        Log.e("ModbusRepository", "openPort(): старт, device=$device")
+
         close()
 
-        // 1. Ищем подходящий драйвер для подключенного USB-устройства с помощью стандартного пробера библиотеки
+        currentManager = usbManager
+        currentDevice = device
+
         val availableDrivers = UsbSerialProber.getDefaultProber().findAllDrivers(usbManager)
+        Log.e("ModbusRepository", "openPort(): найдено драйверов — ${availableDrivers.size}")
         val driver = availableDrivers.find { it.device == device }
 
         if (driver == null) {
@@ -42,100 +41,125 @@ class ModbusRepository {
             return false
         }
 
-        // 2. Открываем физическое соединение с устройством через системный UsbManager
+        // Пауза ПЕРЕД openDevice: после detach/attach ядру нужно время,
+        // чтобы освободить файловый дескриптор. Без этой паузы openDevice()
+        // может вернуть null при повторном подключении.
+        try { Thread.sleep(300) } catch (_: InterruptedException) {}
+
         val connection: UsbDeviceConnection = usbManager.openDevice(driver.device) ?: run {
-            Log.e("ModbusRepository", "Не удалось открыть соединение с устройством")
+            Log.e("ModbusRepository", "openPort(): openDevice вернул null")
             return false
         }
+        Log.e("ModbusRepository", "openPort(): openDevice OK")
+
+        usbConnection = connection
 
         try {
-            // 3. Берем первый порт устройства (driver.ports[0]) и настраиваем его линии управления
             usbPort = driver.ports[0].apply {
-                open(connection) // Открываем порт через созданное соединение
-
-                // Аппаратные линии DTR и RTS переводим в false, делаем паузу,
-                // а затем в true — это часто используется для сброса или инициализации внешних микроконтроллеров
+                open(connection)
                 dtr = false
                 rts = false
-                Thread.sleep(100) // Небольшая задержка в миллисекундах
+                Thread.sleep(100)
                 dtr = true
                 rts = true
-
-                // Настраиваем параметры UART-соединения:
-                // Скорость: 115200 бод, Биты данных: 8, Стоп-биты: 1, Проверка четкости (Parity): Отсутствует (None) -> 8N1
                 setParameters(115200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
             }
 
-            Log.d("ModbusRepository", "USB-порт успешно открыт и настроен на 115200 8N1")
+            Thread.sleep(500)
+
+            Log.e("ModbusRepository", "USB-порт успешно открыт на 115200 8N1")
             return true
 
         } catch (e: Exception) {
-            Log.e("ModbusRepository", "Ошибка при открытии или настройке порта: ${e.message}")
+            Log.e("ModbusRepository", "Ошибка при открытии порта: ${e.message}")
             close()
             return false
         }
     }
 
-    /**
-     * Отправляет запрос по протоколу Modbus RTU для чтения идентификатора устройства (Device ID)
-     * и возвращает результат в виде строки.
-     */
+    private fun drainPort(port: UsbSerialPort, timeoutMs: Int = 30) {
+        val buf = ByteArray(64)
+        try {
+            while (port.read(buf, timeoutMs) > 0) {
+                // выбрасываем
+            }
+        } catch (_: Exception) {}
+    }
+
+    fun reopen(): Boolean {
+        val mgr = currentManager
+        val dev = currentDevice
+        Log.e("ModbusRepository", "reopen(): mgr=${mgr != null}, dev=${dev != null}")
+        if (mgr == null || dev == null) return false
+        val ok = openPort(mgr, dev)
+        Log.e("ModbusRepository", "reopen(): openPort вернул $ok")
+        return ok
+    }
+
     fun readDeviceId(): String? {
-        val port = usbPort ?: return null
+        val port = usbPort ?: run {
+            Log.e("ModbusRepository", "readDeviceId(): usbPort == null")
+            return null
+        }
 
-        // Формируем тело Modbus-запроса (байтовый массив).
-        // 0x01 — адрес устройства (Slave ID), 0x11 — код функции (Report Slave ID / чтение ID),
-        // далее идут два нулевых байта параметров.
-        val request = byteArrayOf(
-            0x01.toByte(),
-            0x11.toByte(),
-            0x00.toByte(), 0x00.toByte()
-        )
+        Log.e("ModbusRepository", "readDeviceId(): isOpen=${port.isOpen}, dtr=${port.dtr}, rts=${port.rts}")
 
-        // Вычисляем контрольную сумму CRC16 для сформированного запроса
+        val request = byteArrayOf(0x01.toByte(), 0x11.toByte())
         val crc = calculateCRC16(request)
-
-        // Соединяем тело запроса и 2 байта контрольной суммы в единый пакет (Modbus RTU Frame)
         val fullRequest = request + crc
 
         try {
-            // Очищаем аппаратные буферы приема/передачи перед отправкой нового запроса,
-            // чтобы избавиться от старого мусора и несчитанных байтов
+            drainPort(port)
+            Thread.sleep(30)
             port.purgeHwBuffers(true, true)
 
-            // Отправляем пакет в порт с таймаутом 1000 мс (1 секунда)
             port.write(fullRequest, 1000)
-            Log.d("ModbusRepository", "Запрос отправлен: ${fullRequest.joinToString(" ") { "%02X".format(it) }}")
+            Log.e("ModbusRepository", "Запрос отправлен: ${fullRequest.joinToString(" ") { "%02X".format(it) }}")
 
-            // Создаем буфер для приема ответа от контроллера
-            val buffer = ByteArray(64)
-            // Читаем данные из порта с таймаутом 1000 мс
-            val bytesRead = port.read(buffer, 1000)
+            val startTime = System.currentTimeMillis()
+            val timeoutMs = 1500L
+            val accumulatedData = ByteArrayOutputStream()
+            val readBuffer = ByteArray(64)
 
-            // Минимальный ответ 0x11: Адрес(1) + Функция(1) + ByteCount(1) + Данные( >= 1 ) + CRC(2) = 6 байт
-            if (bytesRead >= 6) {
-                val slaveId = buffer[0].toInt() and 0xFF
-                val funcCode = buffer[1].toInt() and 0xFF
-                val byteCount = buffer[2].toInt() and 0xFF
+            while (System.currentTimeMillis() - startTime < timeoutMs) {
+                val remainingTime = (timeoutMs - (System.currentTimeMillis() - startTime)).toInt().coerceAtLeast(50)
+                val bytesRead = port.read(readBuffer, remainingTime)
 
-                // Проверяем, что это ответ именно от нашего слайва и на нужную функцию
-                if (slaveId == 0x01 && funcCode == 0x11) {
-                    if (bytesRead >= 3 + byteCount + 2) {
-                        val dataLength = if (byteCount > 1) byteCount - 1 else byteCount
-                        val dataBytes = buffer.copyOfRange(3, 3 + dataLength)
+                if (bytesRead > 0) {
+                    accumulatedData.write(readBuffer, 0, bytesRead)
+                    val currentBytes = accumulatedData.toByteArray()
+                    Log.e("ModbusRepository", "принято $bytesRead байт, всего ${currentBytes.size}: ${currentBytes.joinToString(" ") { "%02X".format(it) }}")
 
-                        val receivedData = dataBytes.toString(Charsets.US_ASCII)
-                            .filter { it in '\u0020'..'\u007E' }
-                            .trim()
+                    if (currentBytes.size >= 3) {
+                        val dataLength = currentBytes[2].toInt() and 0xFF
+                        val expectedTotalLength = 3 + dataLength + 2
 
-                        if (receivedData.isNotEmpty()) {
-                            Log.d("ModbusRepository", "Успешно прочитан ID: '$receivedData'")
-                            return receivedData
+                        if (currentBytes.size >= expectedTotalLength || currentBytes.size >= 52) {
+                            drainPort(port)
+
+                            val slaveId = currentBytes[0].toInt() and 0xFF
+                            val funcCode = currentBytes[1].toInt() and 0xFF
+                            Log.e("ModbusRepository", "пакет: slaveId=0x%02X, funcCode=0x%02X, dataLength=$dataLength".format(slaveId, funcCode))
+
+                            if (slaveId == 0x01 && funcCode == 0x11) {
+                                val payloadEnd = minOf(3 + dataLength, currentBytes.size - 2)
+                                var idText = ""
+                                for (i in 3 until payloadEnd) {
+                                    val b = currentBytes[i].toInt() and 0xFF
+                                    if (b >= 32) idText += b.toChar()
+                                }
+                                val receivedData = idText.trim()
+                                if (receivedData.isNotEmpty()) {
+                                    Log.e("ModbusRepository", "Успешно прочитан ID: '$receivedData'")
+                                    return receivedData
+                                }
+                            }
+                            break
                         }
                     }
                 }
             }
-            Log.w("ModbusRepository", "Ответ от контроллера пустой, поврежден или неполный (bytesRead = $bytesRead)")
+            Log.e("ModbusRepository", "Таймаут чтения ответа")
         } catch (e: Exception) {
             Log.e("ModbusRepository", "Ошибка обмена данными: ${e.message}")
         }
@@ -143,27 +167,34 @@ class ModbusRepository {
     }
 
     /**
-     * Корректно закрывает USB-порт при завершении работы или переподключении.
+     * Закрывает порт. Больше НЕ спит — пауза перенесена в openPort() перед openDevice().
+     * Так shutdown() из broadcastReceiver не блокирует главный поток на 300 мс.
      */
     fun close() {
+        Log.e("ModbusRepository", "close(): старт")
         try {
             if (usbPort?.isOpen == true) {
                 usbPort?.close()
+                Log.e("ModbusRepository", "close(): порт закрыт")
             }
         } catch (e: Exception) {
             Log.e("ModbusRepository", "Ошибка при закрытии порта: ${e.message}")
         } finally {
             usbPort = null
         }
+
+        try {
+            usbConnection?.close()
+            Log.e("ModbusRepository", "close(): соединение закрыто")
+        } catch (e: Exception) {
+            Log.e("ModbusRepository", "Ошибка при закрытии соединения: ${e.message}")
+        } finally {
+            usbConnection = null
+        }
+
+        Log.e("ModbusRepository", "close(): готово")
     }
 
-    /**
-     * Вычисляет контрольную сумму CRC16 (циклический избыточный код)
-     * по стандарту Modbus (полином 0xA001).
-     *
-     * Контрольная сумма обязана присутствовать в конце каждого Modbus RTU пакета,
-     * чтобы принимающая сторона могла проверить целостность данных и отсутствие помех в линии.
-     */
     private fun calculateCRC16(data: ByteArray): ByteArray {
         var crc = 0xFFFF
         for (byte in data) {
@@ -176,7 +207,6 @@ class ModbusRepository {
                 }
             }
         }
-        // Возвращаем CRC разбитым на два байта в порядке little-endian (младший байт вперед)
         return byteArrayOf((crc and 0xFF).toByte(), ((crc shr 8) and 0xFF).toByte())
     }
 }
