@@ -81,34 +81,63 @@ fun ConfigScreen(
         }
 
         Spacer(modifier = Modifier.height(16.dp))
+        //Spacer(modifier = Modifier.height(16.dp))
+
+        // --- Вторая карточка с кнопкой F1  и О нас ---
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant
+            )
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Button(onClick = onRefreshIdClick, shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.weight(1f)) {
+                    Text("F1", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                }
+                Spacer(modifier = Modifier.width(16.dp))
+                Button(onClick = onRefreshIdClick, shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.weight(1f)) {
+                    Text("О нас", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+
         Spacer(modifier = Modifier.height(16.dp))
 
-        // --- Список страниц ---
-        LazyColumn(
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
-        ) {
-            items(pages) { page ->
-                Button(
-                    onClick = { onPageClick(page) },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFF1976D2),
-                        contentColor = Color.White
-                    ),
-                    shape = RoundedCornerShape(8.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(56.dp)
-                ) {
-                    Text(
-                        text = page.title,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Medium
-                    )
+            // --- Список страниц ---
+            LazyColumn(
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+            ) {
+                items(pages) { page ->
+                    Button(
+                        onClick = { onPageClick(page) },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = Color(0xFF1976D2),
+                            contentColor = Color.White
+                        ),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(56.dp)
+                    ) {
+                        Text(
+                            text = page.title,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
                 }
             }
         }
     }
-}
