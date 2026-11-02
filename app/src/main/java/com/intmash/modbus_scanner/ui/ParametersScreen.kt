@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -26,10 +25,11 @@ import androidx.compose.ui.unit.sp
 import com.intmash.modbus_scanner.data.PageInfo
 
 /**
- * ParametersScreen — экран со списком параметров выбранной страницы.
+ * ParametersScreen — экран со списком имён параметров выбранной страницы.
  *
- * На текущем этапе показывает только имена, описания и единицы измерения.
- * Чтение значений через Modbus будет добавлено следующим шагом.
+ * На текущем этапе показывается только имя параметра (например, "Uref").
+ * Описание и единица измерения сохранены в [com.intmash.modbus_scanner.data.ParameterInfo],
+ * но в UI не выводятся — они понадобятся на следующих шагах (чтение значений).
  *
  * @param page Страница из INI-файла с уже разрешёнными параметрами.
  * @param onBack Колбэк кнопки "Назад" (навигация на ConfigScreen).
@@ -86,29 +86,12 @@ fun ParametersScreen(
                             containerColor = MaterialTheme.colorScheme.surfaceVariant
                         )
                     ) {
-                        Column(modifier = Modifier.padding(12.dp)) {
-                            Text(
-                                text = param.name,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 14.sp
-                            )
-                            if (param.description.isNotBlank()) {
-                                Spacer(modifier = Modifier.height(2.dp))
-                                Text(
-                                    text = param.description,
-                                    fontSize = 12.sp,
-                                    color = MaterialTheme.colorScheme.secondary
-                                )
-                            }
-                            if (param.unit.isNotBlank()) {
-                                Spacer(modifier = Modifier.height(2.dp))
-                                Text(
-                                    text = "Ед. изм.: ${param.unit}",
-                                    fontSize = 11.sp,
-                                    color = MaterialTheme.colorScheme.secondary
-                                )
-                            }
-                        }
+                        Text(
+                            text = param.name,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp,
+                            modifier = Modifier.padding(12.dp)
+                        )
                     }
                 }
             }
