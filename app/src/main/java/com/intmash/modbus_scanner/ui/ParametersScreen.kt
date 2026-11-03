@@ -1,9 +1,11 @@
-//modbus_scanner/ui/ParametersScreen.kt
-
+// app/src/main/java/com/intmash/modbus_scanner/ui/ParametersScreen.kt
 package com.intmash.modbus_scanner.ui
 
+import android.util.Log
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -43,34 +45,32 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.intmash.modbus_scanner.data.DecodedValue
+import com.intmash.modbus_scanner.data.ModbusParameter
+import com.intmash.modbus_scanner.data.ModbusParameterParser
 import com.intmash.modbus_scanner.data.PageInfo
 import kotlinx.coroutines.launch
 
 /**
- * ParametersScreen — экран со списком параметров выбранной страницы INI-файла
- * и их текущими значениями, обновляемыми опросом через [ParametersViewModel].
+ * ParametersScreen — экран параметров выбранной страницы INI-файла.
  *
- * Возможности экрана:
- *  1. Список параметров в три колонки: имя | единица | значение.
- *     Значение прижато к правому краю, обновляется автоматически.
- *     Пока значение не прочитано — показывается "---".
- *  2. Клик по карточке — выбор параметра (визуальная подсветка).
- *     Повторный клик снимает выбор.
- *  3. Кнопка "F1" в шапке — показывает описание выбранного параметра.
- *  4. Баннер "Нет связи" внизу, когда 3 цикла опроса подряд провалились.
+ * Возможности:
+ *  1. Три колонки в каждой карточке: имя | единица | значение.
+ *     Значение обновляется автоматически из [ParametersViewModel].
+ *  2. Обычный тап по карточке — выбор параметра (подсветка).
+ *     Повторный тап снимает выбор.
+ *  3. Долгий тап по карточке — открывает диалог записи значения.
+ *  4. Кнопка "F1" в шапке — описание выбранного параметра (AlertDialog).
+ *  5. Баннер "Нет связи" внизу, когда [ParametersViewModel] зафиксировала
+ *     3 провала опроса подряд.
+ *  6. Для TBit-параметров значение показывается квадратиком:
+ *     заполненный = 1, контур = 0.
  *
- * Архитектура:
- *  - Экран "stateless" снаружи: данные и действия приходят через аргументы.
- *  - Сам хранит только локальное UI-состояние: selectedKey, descriptionText.
- *  - Значения параметров и состояние опроса живут в [ParametersViewModel],
- *    которая создаётся на уровне навигации (в AppNavHost) и живёт столько же,
- *    сколько открыт экран.
- *
- * @param page Страница с уже разрешёнными параметрами (парсер поработал).
- * @param parametersViewModel ViewModel, управляющая опросом и хранящая значения.
- * @param onBack Колбэк кнопки "← Назад" (возврат на ConfigScreen).
+ * @param page Страница с уже разрешёнными параметрами из INI.
+ * @param parametersViewModel ViewModel опроса и значений (живёт в навигации).
+ * @param onBack Колбэк кнопки "← Назад".
  * @param modifier Модификатор компоновки.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ParametersScreen(
     page: PageInfo,
@@ -79,28 +79,33 @@ fun ParametersScreen(
     modifier: Modifier = Modifier
 ) {
     // =========================================================================
-    // ЛОКАЛЬНОЕ UI-СОСТОЯНИЕ ЭКРАНА
+    // ЛОКАЛЬНОЕ UI-СОСТОЯНИЕ
     // =========================================================================
 
-    // selectedKey — "какой параметр сейчас выбран". Тип String? — это key
-    // из ParameterInfo (например, "p201" для Uref). null = ничего не выбрано.
-    //
-    // Почему String?, а не сам ParameterInfo: String штатно сериализуется
-    // в Bundle через rememberSaveable и переживает поворот экрана без
-    // кастомного Saver.
+    // selectedKey — "какой параметр сейчас выбран". Тип String? — key из
+    // ParameterInfo ("p201"). null = ничего не выбрано.
+    // rememberSaveable — переживает поворот экрана (String штатно Bundle).
     var selectedKey by rememberSaveable { mutableStateOf<String?>(null) }
 
-    // descriptionText — текст, который сейчас показывается в диалоге F1.
+    // descriptionText — текст описания, открытого в AlertDialog (F1).
     // null = диалог закрыт, не-null = диалог открыт с этим текстом.
     var descriptionText by rememberSaveable { mutableStateOf<String?>(null) }
 
-    // snackbarHostState — управляет Snackbar'ами внизу экрана (например,
-    // "У параметра нет описания"). remember (не saveable) — Snackbar эфемерный.
+    // snackbarHostState — управляет Snackbar'ами внизу экрана.
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
+    // writeParam — параметр, для которого открыт диалог записи.
+    // null = диалог закрыт. Не-null = открыт диалог для этого параметра.
+    // Тип — ModbusParameter (а не ParameterInfo): диалогу нужны тип,
+    // масштаб, словарь TPrmList и адрес — всё уже разобрано парсером.
+    // remember (не saveable): при повороте экрана диалог закрывается —
+    // открытый диалог с введённым значением после поворота мог бы
+    // привести к случайной записи, риск выше пользы.
+    var writeParam by remember { mutableStateOf<ModbusParameter?>(null) }
+
     // =========================================================================
-    // КОРНЕВОЙ КОНТЕЙНЕР: Scaffold
+    // КОРНЕВОЙ КОНТЕЙНЕР
     // =========================================================================
     Scaffold(
         modifier = modifier.fillMaxSize(),
@@ -126,8 +131,6 @@ fun ParametersScreen(
 
                 Spacer(modifier = Modifier.width(8.dp))
 
-                // Заголовок. weight(1f) съедает всё свободное место,
-                // прижимая F1 к правому краю.
                 Text(
                     text = page.title,
                     fontWeight = FontWeight.Bold,
@@ -136,9 +139,6 @@ fun ParametersScreen(
                     modifier = Modifier.weight(1f)
                 )
 
-                // F1 — показать описание выбранного параметра.
-                //  - не выбрано / нет описания → Snackbar;
-                //  - есть → открыть AlertDialog.
                 Button(
                     onClick = {
                         val selected = page.parameters.find { it.key == selectedKey }
@@ -172,8 +172,8 @@ fun ParametersScreen(
                     )
                 }
             } else {
-                // weight(1f) вместо fillMaxSize — список занимает всё
-                // оставшееся место, а под ним ещё может быть баннер "Нет связи".
+                // weight(1f): список занимает всё оставшееся место,
+                // оставляя место внизу под баннер "Нет связи".
                 LazyColumn(
                     contentPadding = PaddingValues(16.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -182,32 +182,42 @@ fun ParametersScreen(
                         .weight(1f)
                 ) {
                     items(page.parameters) { param ->
-                        // isSelected — выбрана ли ИМЕННО эта карточка (сравнение по key).
                         val isSelected = param.key == selectedKey
 
                         // decodedValue — текущее значение из ViewModel.
-                        // null, пока первый цикл опроса не прошёл (или связь потеряна).
+                        // null, пока первый цикл опроса не прошёл.
                         val decodedValue = parametersViewModel.values[param.key]
 
-                        // valueText — что показывать в правой колонке для числовых
-                        // и списочных параметров. Для TBit не используется (там квадратик).
+                        // valueText — для числовых и списочных параметров.
+                        // Для TBit не используется (там квадратик).
                         val valueText = decodedValue?.display ?: "---"
 
-                        // isTBitParam — этот параметр отображается квадратиком, а не текстом.
-                        // Определяем по типу из INI ("TBit"). Строковое сравнение
-                        // без учёта регистра — чтобы не тащить ModbusParameter в UI-слой.
+                        // isTBitParam — тип TBit отображается квадратиком.
                         val isTBitParam = param.type.equals("TBit", ignoreCase = true)
 
-                        // bitRaw — состояние квадратика: true = заполнен ("1"),
-                        // false = контур ("0"). Если значение ещё не прочитано
-                        // (decodedValue = null) — трактуем как false (пустой квадрат).
+                        // bitRaw — состояние квадратика. true = заполнен,
+                        // false = контур. Нет значения → пустой квадрат.
                         val bitRaw = (decodedValue as? DecodedValue.Bit)?.raw ?: false
 
+                        // Card без onClick: обычный Card с кастомным
+                        // combinedClickable в modifier. Обрабатывает и обычный
+                        // тап (выбор параметра), и долгий (диалог записи).
                         Card(
-                            onClick = {
-                                selectedKey = if (isSelected) null else param.key
-                            },
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .combinedClickable(
+                                    onClick = {
+                                        Log.e("TAP_TEST", "onClick: ${param.key} ${param.name}")
+                                        selectedKey = if (isSelected) null else param.key
+                                    },
+                                    onLongClick = {
+                                        // Разбираем ParameterInfo → ModbusParameter.
+                                        // null (некорректное описание в INI) — диалог
+                                        // не открываем.
+                                        Log.e("TAP_TEST", "onLongClick: ${param.key} ${param.name}")
+                                        writeParam = ModbusParameterParser.parse(param)
+                                    }
+                                ),
                             colors = CardDefaults.cardColors(
                                 containerColor = if (isSelected) {
                                     MaterialTheme.colorScheme.primaryContainer
@@ -216,17 +226,14 @@ fun ParametersScreen(
                                 }
                             )
                         ) {
-                            // Три колонки внутри карточки: имя | единица | значение.
-                            // Пропорции 2:1:1 — имя обычно самое длинное,
-                            // единица короткая, значение короткое (но может быть
-                            // многозначным, поэтому одна треть — с запасом).
+                            // Три колонки: имя (2) | единица (1) | значение (1).
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(12.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                // 1. Имя параметра (левая колонка, выравнивание влево).
+                                // 1. Имя параметра.
                                 Text(
                                     text = param.name,
                                     fontWeight = FontWeight.Bold,
@@ -234,9 +241,7 @@ fun ParametersScreen(
                                     modifier = Modifier.weight(2f)
                                 )
 
-                                // 2. Единица измерения (средняя колонка, по центру).
-                                //    В INI маркер "нет единицы" — "*"; в ModbusParameter
-                                //    он уже превращён в пустую строку.
+                                // 2. Единица измерения (по центру).
                                 Text(
                                     text = param.unit,
                                     fontSize = 14.sp,
@@ -245,18 +250,13 @@ fun ParametersScreen(
                                     modifier = Modifier.weight(1f)
                                 )
 
-                                // 3. Значение (правая колонка, прижато к правому краю).
-                                // Для TBit — квадратик: заполненный = "1", контур = "0".
-                                // Для остальных типов — текст (например, "219.9").
+                                // 3. Значение (справа).
+                                // Для TBit — квадратик, для остальных — текст.
                                 Box(
                                     modifier = Modifier.weight(1f),
                                     contentAlignment = Alignment.CenterEnd
                                 ) {
                                     if (isTBitParam) {
-                                        // Квадрат 18×18 dp прижат к правому краю.
-                                        // Граница всегда onSurface — читается на светлой
-                                        // и тёмной теме, а также на подсвеченной карточке
-                                        // (primaryContainer).
                                         Box(
                                             modifier = Modifier
                                                 .size(18.dp)
@@ -290,9 +290,6 @@ fun ParametersScreen(
             // =================================================================
             // БАННЕР "НЕТ СВЯЗИ"
             // =================================================================
-            // Показывается, когда ParametersViewModel зафиксировала
-            // FAILURES_BEFORE_NO_CONNECTION провалов подряд. Исчезает
-            // автоматически при первом успешном цикле.
             if (parametersViewModel.pollingState == PollingState.NoConnection) {
                 Card(
                     modifier = Modifier
@@ -320,9 +317,6 @@ fun ParametersScreen(
     // =========================================================================
     // ДИАЛОГ ОПИСАНИЯ (F1)
     // =========================================================================
-    // Рисуется поверх содержимого — стандартный приём в Compose.
-    // Условие: descriptionText != null (кнопка F1 установила его) и
-    // currentParam != null (защита от рассогласования selectedKey ↔ параметр).
     val currentParam = page.parameters.find { it.key == selectedKey }
     if (descriptionText != null && currentParam != null) {
         AlertDialog(
@@ -345,6 +339,29 @@ fun ParametersScreen(
                 TextButton(onClick = { descriptionText = null }) {
                     Text("OK")
                 }
+            }
+        )
+    }
+
+    // =========================================================================
+    // ДИАЛОГ ЗАПИСИ (долгий тап по карточке)
+    // =========================================================================
+    // currentValue — текущее значение из ViewModel (для предзаполнения).
+    // onConfirm — ЗАГЛУШКА: реальная запись будет следующим шагом.
+    val writeParamValue = writeParam
+    if (writeParamValue != null) {
+        WriteDialog(
+            param = writeParamValue,
+            currentValue = parametersViewModel.values[writeParamValue.key],
+            onDismiss = { writeParam = null },
+            onConfirm = { value ->
+                Log.e(
+                    "WRITE_TEST",
+                    "Запись ${writeParamValue.name} = $value " +
+                            "(тип ${writeParamValue.type}, масштаб ${writeParamValue.scale}, " +
+                            "адрес ${writeParamValue.address}). Реальная запись пока не реализована."
+                )
+                writeParam = null
             }
         )
     }

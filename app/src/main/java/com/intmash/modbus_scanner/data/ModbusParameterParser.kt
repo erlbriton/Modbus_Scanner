@@ -1,3 +1,5 @@
+// intmash/modbus_scanner/data/ModbusParameterParser.kt
+
 package com.intmash.modbus_scanner.data
 
 /**
@@ -149,18 +151,23 @@ object ModbusParameterParser {
 
             val number = hexPart.toIntOrNull(16) ?: return null
 
-            // Суффикс-цифра → номер бита (0..15).
-            val bitNumber = suffix.toIntOrNull()
-            if (bitNumber != null) {
-                return RegisterAddress.Bit(number, bitNumber)
+            // Порядок проверок важен. Суффиксы L и H в hex-системе — это
+            // числа 11 и 12, но в INI они обозначают половину байта
+            // (Low/High), а не номер бита. Поэтому сначала проверяем
+            // L/H, и только если не совпало — пытаемся распарсить
+            // суффикс как hex-число (номер бита 0..15).
+            when (suffix.uppercase()) {
+                "L" -> return RegisterAddress.ByteField(number, BytePart.Low)
+                "H" -> return RegisterAddress.ByteField(number, BytePart.High)
             }
 
-            // Суффикс-буква → половина байта.
-            return when (suffix.uppercase()) {
-                "L" -> RegisterAddress.ByteField(number, BytePart.Low)
-                "H" -> RegisterAddress.ByteField(number, BytePart.High)
-                else -> null
+            // Номер бита в шестнадцатеричной системе (0..F → 0..15).
+            // Примеры: "0" → 0, "9" → 9, "A" → 10, "F" → 15.
+            val bitNumber = suffix.toIntOrNull(16)
+            if (bitNumber != null && bitNumber in 0..15) {
+                return RegisterAddress.Bit(number, bitNumber)
             }
+            return null
         }
 
         // Форма "rXXXX" без суффикса — обычный регистр.
