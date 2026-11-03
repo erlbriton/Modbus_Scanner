@@ -9,6 +9,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -29,6 +33,7 @@ import com.intmash.modbus_scanner.data.PageInfo
  * @param modifier Модификатор компоновки.
  */
 @Composable
+
 fun ConfigScreen(
     deviceId: String,
     selectedFileName: String,
@@ -37,6 +42,8 @@ fun ConfigScreen(
     onPageClick: (PageInfo) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    var showAbout by rememberSaveable { mutableStateOf(false) }//Переменная "Показать - скрыть" текст "О нас"
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -83,7 +90,7 @@ fun ConfigScreen(
         Spacer(modifier = Modifier.height(16.dp))
         //Spacer(modifier = Modifier.height(16.dp))
 
-        // --- Вторая карточка с кнопкой F1  и О нас ---
+        // --- Вторая карточка с  "О нас" ---
 
         Card(
             modifier = Modifier.fillMaxWidth(),
@@ -98,12 +105,12 @@ fun ConfigScreen(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Button(onClick = onRefreshIdClick, shape = RoundedCornerShape(10.dp),
-                    modifier = Modifier.weight(1f)) {
-                    Text("F1", fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                }
-                Spacer(modifier = Modifier.width(16.dp))
-                Button(onClick = onRefreshIdClick, shape = RoundedCornerShape(10.dp),
+//                Button(onClick = onRefreshIdClick, shape = RoundedCornerShape(10.dp),
+//                    modifier = Modifier.weight(1f)) {
+//                    Text("F1", fontSize = 16.sp, fontWeight = FontWeight.Bold)
+//                }
+//                Spacer(modifier = Modifier.width(16.dp))
+                Button(onClick = {showAbout = true}, shape = RoundedCornerShape(10.dp),
                     modifier = Modifier.weight(1f)) {
                     Text("О нас", fontSize = 16.sp, fontWeight = FontWeight.Bold)
                 }
@@ -140,4 +147,17 @@ fun ConfigScreen(
                 }
             }
         }
+
+    if (showAbout) {
+        AlertDialog(
+            onDismissRequest = { showAbout = false },
+            title = { Text("О нас") },
+            text = { Text("Компания Интмаш, www.intmash.ru,     тел. 913-909-03-70 ") },
+            confirmButton = {
+                TextButton(onClick = { showAbout = false }) {
+                    Text("OK")
+                }
+            }
+        )
+    }
     }
