@@ -43,6 +43,7 @@ fun ConfigScreen(
     modifier: Modifier = Modifier
 ) {
     var showAbout by rememberSaveable { mutableStateOf(false) }//Переменная "Показать - скрыть" текст "О нас"
+    val closeDialog: () -> Unit = { showAbout = false }
 
     Column(
         modifier = modifier
@@ -150,11 +151,11 @@ fun ConfigScreen(
 
     if (showAbout) {
         AlertDialog(
-            onDismissRequest = { showAbout = false },
+            onDismissRequest = closeDialog,
             title = { Text("О нас") },
             text = { Text("Компания Интмаш, www.intmash.ru,     тел. 913-909-03-70 ") },
             confirmButton = {
-                TextButton(onClick = { showAbout = false }) {
+                TextButton(onClick = closeDialog) {
                     Text("OK")
                 }
             }
