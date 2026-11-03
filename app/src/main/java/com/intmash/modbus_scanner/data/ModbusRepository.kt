@@ -167,6 +167,154 @@ class ModbusRepository {
     }
 
     /**
+     * Читает N 16-битных регистров начиная с адреса [startRegister] по протоколу
+     * Modbus RTU, функция 0x03 (Read Holding Registers).
+     *
+     * Это основной запрос для чтения параметров из секций [RAM], [FLASH], [CD].
+     * Один запрос может прочитать до 125 регистров за раз, что даёт кратное
+     * ускорение опроса: одна транзакция вместо N отдельных.
+     *
+     * @param slaveAddr Адрес подчинённого устройства. Пока всегда 1 (по договорённости).
+     * @param startRegister Начальный адрес (0x0000..0xFFFF).
+     * @param count Сколько регистров прочитать (1..125).
+     * @return Массив прочитанных значений (каждое 0..0xFFFF), либо null при ошибке.
+     *         null возвращается и при отсутствии ответа, и при Modbus-исключении
+     *         (например, контроллер ответил кодом 0x02 "Illegal data address").
+     */
+    fun readHoldingRegisters(slaveAddr: Int, startRegister: Int, count: Int): IntArray? {
+        val port = usbPort ?: run {
+            Log.e("ModbusRepository", "readHoldingRegisters(): usbPort == null")
+            return null
+        }
+
+        // Стандарт Modbus ограничивает один кадр 125 регистрами (250 байт данных).
+        if (count < 1 || count > 125) {
+            Log.e("ModbusRepository", "readHoldingRegisters(): некорректный count=$count")
+            return null
+        }
+
+        // Тело запроса функции 0x03:
+        // [slave][0x03][startHi][startLo][countHi][countLo][CRC16_lo][CRC16_hi]
+        val request = byteArrayOf(
+            (slaveAddr and 0xFF).toByte(),
+            0x03.toByte(),
+            ((startRegister shr 8) and 0xFF).toByte(),
+            (startRegister and 0xFF).toByte(),
+            ((count shr 8) and 0xFF).toByte(),
+            (count and 0xFF).toByte()
+        )
+        val crc = calculateCRC16(request)
+        val fullRequest = request + crc
+
+        try {
+            // Чистим буфер от "хвостов" предыдущих обменов (например, readDeviceId).
+            drainPort(port)
+            Thread.sleep(5)
+            port.purgeHwBuffers(true, true)
+
+            port.write(fullRequest, 1000)
+            Log.e(
+                "ModbusRepository",
+                "0x03 → slave=$slaveAddr, reg=0x%04X, count=$count, пакет: %s".format(
+                    startRegister,
+                    fullRequest.joinToString(" ") { "%02X".format(it) }
+                )
+            )
+
+            // Ожидаемая длина ответа: 3 байта заголовка (slave, func, byteCount)
+            // + byteCount байт данных + 2 байта CRC.
+            val expectedByteCount = count * 2
+            val expectedTotalLength = 3 + expectedByteCount + 2
+
+            val startTime = System.currentTimeMillis()
+            // Таймаут одного запроса. Короче, чем в readDeviceId (там 1500 мс):
+            // при опросе важно быстро вернуть null, а не ждать секунды при обрыве.
+            val timeoutMs = 500L
+            val accumulatedData = ByteArrayOutputStream()
+            val readBuffer = ByteArray(64)
+
+            while (System.currentTimeMillis() - startTime < timeoutMs) {
+                val remainingTime = (timeoutMs - (System.currentTimeMillis() - startTime))
+                    .toInt().coerceAtLeast(50)
+                val bytesRead = port.read(readBuffer, remainingTime)
+
+                if (bytesRead > 0) {
+                    accumulatedData.write(readBuffer, 0, bytesRead)
+                    val currentBytes = accumulatedData.toByteArray()
+
+                    // Modbus Exception: старший бит байта функции = 1 (0x83 для 0x03).
+                    // Формат ответа-исключения: [slave][0x83][exceptionCode][CRC16].
+                    if (currentBytes.size >= 5 && (currentBytes[1].toInt() and 0x80) != 0) {
+                        val exceptionCode = currentBytes[2].toInt() and 0xFF
+                        Log.e(
+                            "ModbusRepository",
+                            "Modbus Exception: func=0x%02X, code=0x%02X".format(
+                                currentBytes[1].toInt() and 0xFF,
+                                exceptionCode
+                            )
+                        )
+                        drainPort(port)
+                        return null
+                    }
+
+                    // Обычный ответ — дочитываем до полной длины.
+                    if (currentBytes.size >= expectedTotalLength) {
+                        drainPort(port)
+                        return parseHoldingRegistersResponse(currentBytes, slaveAddr, count)
+                    }
+                }
+            }
+            Log.w("ModbusRepository", "readHoldingRegisters: таймаут")
+        } catch (e: Exception) {
+            Log.e("ModbusRepository", "readHoldingRegisters: ошибка: ${e.message}")
+        }
+        return null
+    }
+
+    /**
+     * Разбирает ответ на запрос 0x03 и возвращает массив значений.
+     * Формат: [slave][0x03][byteCount][dataHi0][dataLo0]...[CRC16_lo][CRC16_hi].
+     *
+     * Каждый регистр — 2 байта в big-endian (старший байт приходит первым).
+     * Это стандарт Modbus RTU. Если конкретное устройство использует другой порядок,
+     * это будет видно по мусорным значениям, и решается заменой порядка.
+     */
+    private fun parseHoldingRegistersResponse(
+        data: ByteArray,
+        expectedSlave: Int,
+        expectedCount: Int
+    ): IntArray? {
+        val slave = data[0].toInt() and 0xFF
+        if (slave != expectedSlave) {
+            Log.e("ModbusRepository", "Неверный slave в ответе: $slave (ожидали $expectedSlave)")
+            return null
+        }
+
+        val func = data[1].toInt() and 0xFF
+        if (func != 0x03) {
+            Log.e("ModbusRepository", "Неверный func в ответе: 0x%02X".format(func))
+            return null
+        }
+
+        val byteCount = data[2].toInt() and 0xFF
+        if (byteCount != expectedCount * 2) {
+            Log.e(
+                "ModbusRepository",
+                "Неверный byteCount: $byteCount (ожидали ${expectedCount * 2})"
+            )
+            return null
+        }
+
+        val result = IntArray(expectedCount)
+        for (i in 0 until expectedCount) {
+            val hi = data[3 + i * 2].toInt() and 0xFF
+            val lo = data[3 + i * 2 + 1].toInt() and 0xFF
+            result[i] = (hi shl 8) or lo
+        }
+        return result
+    }
+
+    /**
      * Закрывает порт. Больше НЕ спит — пауза перенесена в openPort() перед openDevice().
      * Так shutdown() из broadcastReceiver не блокирует главный поток на 300 мс.
      */

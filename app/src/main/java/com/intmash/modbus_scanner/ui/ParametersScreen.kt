@@ -1,6 +1,11 @@
+//modbus_scanner/ui/ParametersScreen.kt
+
 package com.intmash.modbus_scanner.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -8,6 +13,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -31,82 +37,71 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.intmash.modbus_scanner.data.DecodedValue
 import com.intmash.modbus_scanner.data.PageInfo
 import kotlinx.coroutines.launch
 
 /**
- * ParametersScreen — экран со списком параметров выбранной страницы INI-файла.
+ * ParametersScreen — экран со списком параметров выбранной страницы INI-файла
+ * и их текущими значениями, обновляемыми опросом через [ParametersViewModel].
  *
  * Возможности экрана:
- *  1. Список параметров с именем и единицей измерения ("Uref, V").
+ *  1. Список параметров в три колонки: имя | единица | значение.
+ *     Значение прижато к правому краю, обновляется автоматически.
+ *     Пока значение не прочитано — показывается "---".
  *  2. Клик по карточке — выбор параметра (визуальная подсветка).
- *     Повторный клик на выбранной карточке снимает выбор.
- *  3. Кнопка "F1" в шапке — показывает описание выбранного параметра
- *     в модальном диалоге. Если параметр не выбран или у него нет описания
- *     в INI-файле — показывается короткое уведомление Snackbar.
- *  4. Выбранный параметр и открытый диалог переживают поворот экрана
- *     благодаря rememberSaveable.
+ *     Повторный клик снимает выбор.
+ *  3. Кнопка "F1" в шапке — показывает описание выбранного параметра.
+ *  4. Баннер "Нет связи" внизу, когда 3 цикла опроса подряд провалились.
  *
  * Архитектура:
- *  - Экран "Stateless" снаружи (принимает page и колбэк onBack),
- *    но "stateful" внутри (сам хранит selectedKey и descriptionText).
- *  - Сравнение параметров везде идёт по `key` (например "p201"), а не по `name`,
- *    чтобы избежать путаницы при дубликатах имён в разных секциях INI-файла.
+ *  - Экран "stateless" снаружи: данные и действия приходят через аргументы.
+ *  - Сам хранит только локальное UI-состояние: selectedKey, descriptionText.
+ *  - Значения параметров и состояние опроса живут в [ParametersViewModel],
+ *    которая создаётся на уровне навигации (в AppNavHost) и живёт столько же,
+ *    сколько открыт экран.
  *
  * @param page Страница с уже разрешёнными параметрами (парсер поработал).
- * @param onBack Колбэк для кнопки "← Назад" (возврат на ConfigScreen).
+ * @param parametersViewModel ViewModel, управляющая опросом и хранящая значения.
+ * @param onBack Колбэк кнопки "← Назад" (возврат на ConfigScreen).
  * @param modifier Модификатор компоновки.
  */
 @Composable
 fun ParametersScreen(
     page: PageInfo,
+    parametersViewModel: ParametersViewModel,
     onBack: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     // =========================================================================
-    // СОСТОЯНИЕ ЭКРАНА
+    // ЛОКАЛЬНОЕ UI-СОСТОЯНИЕ ЭКРАНА
     // =========================================================================
 
-    // selectedKey — "какой параметр сейчас выбран".
-    // Тип String? — это key из ParameterInfo (например, "p201" для Uref).
-    // null означает "ничего не выбрано".
+    // selectedKey — "какой параметр сейчас выбран". Тип String? — это key
+    // из ParameterInfo (например, "p201" для Uref). null = ничего не выбрано.
     //
-    // Почему String?, а не сам ParameterInfo:
-    //  1) String штатно сериализуется в Bundle — rememberSaveable переживёт
-    //     поворот экрана и восстановление процесса без кастомного Saver.
-    //  2) Сравнение по key безопаснее, чем по name: если в INI-файле встретятся
-    //     два параметра с одинаковым именем в разных секциях,
-    //     сравнение по key их не перепутает.
-    //
-    // var, а не val — потому что значение будет меняться при клике на карточку.
+    // Почему String?, а не сам ParameterInfo: String штатно сериализуется
+    // в Bundle через rememberSaveable и переживает поворот экрана без
+    // кастомного Saver.
     var selectedKey by rememberSaveable { mutableStateOf<String?>(null) }
 
-    // descriptionText — текст описания, который сейчас показывается в диалоге.
+    // descriptionText — текст, который сейчас показывается в диалоге F1.
     // null = диалог закрыт, не-null = диалог открыт с этим текстом.
-    // Это стандартный "trick" в Compose: переменная-триггер для условного рендера.
     var descriptionText by rememberSaveable { mutableStateOf<String?>(null) }
 
-    // snackbarHostState — управляет показом уведомлений Snackbar внизу экрана.
-    // Нужен для случая "у параметра нет описания". remember (без saveable),
-    // потому что Snackbar не должен переживать поворот — он эфемерный.
+    // snackbarHostState — управляет Snackbar'ами внизу экрана (например,
+    // "У параметра нет описания"). remember (не saveable) — Snackbar эфемерный.
     val snackbarHostState = remember { SnackbarHostState() }
-
-    // rememberCoroutineScope — область видимости корутин, привязанная к этому Composable.
-    // Нужна потому, что snackbarHostState.showSnackbar() — suspend-функция,
-    // её можно вызывать только из корутины. При уходе с экрана scope отменяется
-    // автоматически — утечек не будет.
     val scope = rememberCoroutineScope()
 
     // =========================================================================
     // КОРНЕВОЙ КОНТЕЙНЕР: Scaffold
     // =========================================================================
-    // Scaffold оборачивает весь экран и автоматически размещает Snackbar внизу.
-    // innerPadding — внутренние отступы, которые Scaffold "резервирует" под свои
-    // элементы. Передаём их в наш Column, чтобы содержимое не перекрывалось
-    // со Snackbar.
     Scaffold(
         modifier = modifier.fillMaxSize(),
         snackbarHost = { SnackbarHost(snackbarHostState) }
@@ -125,15 +120,14 @@ fun ParametersScreen(
                     .fillMaxWidth()
                     .padding(horizontal = 8.dp, vertical = 4.dp)
             ) {
-                // Кнопка возврата на предыдущий экран (ConfigScreen).
                 TextButton(onClick = onBack) {
                     Text("← Назад", fontSize = 14.sp)
                 }
 
                 Spacer(modifier = Modifier.width(8.dp))
 
-                // Заголовок страницы. weight(1f) заставляет текст занять
-                // всё свободное место, прижимая F1 к правому краю Row.
+                // Заголовок. weight(1f) съедает всё свободное место,
+                // прижимая F1 к правому краю.
                 Text(
                     text = page.title,
                     fontWeight = FontWeight.Bold,
@@ -142,11 +136,9 @@ fun ParametersScreen(
                     modifier = Modifier.weight(1f)
                 )
 
-                // F1 — кнопка "показать описание выбранного параметра".
-                // Логика:
-                //   - если ничего не выбрано ИЛИ у выбранного нет описания
-                //     → показываем Snackbar "У параметра нет описания";
-                //   - иначе → открываем AlertDialog с описанием.
+                // F1 — показать описание выбранного параметра.
+                //  - не выбрано / нет описания → Snackbar;
+                //  - есть → открыть AlertDialog.
                 Button(
                     onClick = {
                         val selected = page.parameters.find { it.key == selectedKey }
@@ -168,9 +160,6 @@ fun ParametersScreen(
             // СПИСОК ПАРАМЕТРОВ
             // =================================================================
             if (page.parameters.isEmpty()) {
-                // Заглушка, если INI-файл не содержит параметров для этой страницы
-                // (например, в [PAGES] есть ссылка, но в секции параметров
-                // ничего не найдено — опечатка в имени).
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
@@ -183,47 +172,42 @@ fun ParametersScreen(
                     )
                 }
             } else {
+                // weight(1f) вместо fillMaxSize — список занимает всё
+                // оставшееся место, а под ним ещё может быть баннер "Нет связи".
                 LazyColumn(
                     contentPadding = PaddingValues(16.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.fillMaxSize()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
                 ) {
                     items(page.parameters) { param ->
-                        // Для каждой карточки вычисляем два производных значения:
-                        //
-                        // 1) isSelected — выбрана ли ИМЕННО эта карточка.
-                        //    Сравниваем по key, не по name.
-                        //
-                        // 2) label — что показывать в тексте карточки:
-                        //    "Uref, V" если единица измерения задана,
-                        //    "Uref"    если единица пустая или "*".
-                        //    "*" в INI-файле — это маркер "единицы нет".
+                        // isSelected — выбрана ли ИМЕННО эта карточка (сравнение по key).
                         val isSelected = param.key == selectedKey
-                        val label = if (param.unit.isNotBlank() && param.unit != "*") {
-                            "${param.name}, ${param.unit}"
-                        } else {
-                            param.name
-                        }
 
-                        // Card с onClick — кликабельная карточка Material3.
-                        // Автоматически добавляет ripple-эффект при нажатии
-                        // и корректно работает с TalkBack (accessibility).
+                        // decodedValue — текущее значение из ViewModel.
+                        // null, пока первый цикл опроса не прошёл (или связь потеряна).
+                        val decodedValue = parametersViewModel.values[param.key]
+
+                        // valueText — что показывать в правой колонке для числовых
+                        // и списочных параметров. Для TBit не используется (там квадратик).
+                        val valueText = decodedValue?.display ?: "---"
+
+                        // isTBitParam — этот параметр отображается квадратиком, а не текстом.
+                        // Определяем по типу из INI ("TBit"). Строковое сравнение
+                        // без учёта регистра — чтобы не тащить ModbusParameter в UI-слой.
+                        val isTBitParam = param.type.equals("TBit", ignoreCase = true)
+
+                        // bitRaw — состояние квадратика: true = заполнен ("1"),
+                        // false = контур ("0"). Если значение ещё не прочитано
+                        // (decodedValue = null) — трактуем как false (пустой квадрат).
+                        val bitRaw = (decodedValue as? DecodedValue.Bit)?.raw ?: false
+
                         Card(
                             onClick = {
-                                // Тап по карточке — переключение выбора:
-                                //  - если карточка уже выбрана → снимаем выбор (null);
-                                //  - если не выбрана → выбираем её.
-                                // Прежний выбор при этом автоматически сбрасывается:
-                                // selectedKey теперь указывает на новый ключ,
-                                // и все остальные карточки при перерисовке
-                                // увидят isSelected = false.
                                 selectedKey = if (isSelected) null else param.key
                             },
                             modifier = Modifier.fillMaxWidth(),
-                            // Цвет контейнера зависит от того, выбрана ли карточка:
-                            //  - primaryContainer — заметный акцентный цвет
-                            //    (тема сама подбирает подходящий оттенок);
-                            //  - surfaceVariant — нейтральный, как у остальных.
                             colors = CardDefaults.cardColors(
                                 containerColor = if (isSelected) {
                                     MaterialTheme.colorScheme.primaryContainer
@@ -232,43 +216,117 @@ fun ParametersScreen(
                                 }
                             )
                         ) {
-                            Text(
-                                text = label,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 14.sp,
-                                modifier = Modifier.padding(12.dp)
-                            )
+                            // Три колонки внутри карточки: имя | единица | значение.
+                            // Пропорции 2:1:1 — имя обычно самое длинное,
+                            // единица короткая, значение короткое (но может быть
+                            // многозначным, поэтому одна треть — с запасом).
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                // 1. Имя параметра (левая колонка, выравнивание влево).
+                                Text(
+                                    text = param.name,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp,
+                                    modifier = Modifier.weight(2f)
+                                )
+
+                                // 2. Единица измерения (средняя колонка, по центру).
+                                //    В INI маркер "нет единицы" — "*"; в ModbusParameter
+                                //    он уже превращён в пустую строку.
+                                Text(
+                                    text = param.unit,
+                                    fontSize = 14.sp,
+                                    color = MaterialTheme.colorScheme.secondary,
+                                    textAlign = TextAlign.Center,
+                                    modifier = Modifier.weight(1f)
+                                )
+
+                                // 3. Значение (правая колонка, прижато к правому краю).
+                                // Для TBit — квадратик: заполненный = "1", контур = "0".
+                                // Для остальных типов — текст (например, "219.9").
+                                Box(
+                                    modifier = Modifier.weight(1f),
+                                    contentAlignment = Alignment.CenterEnd
+                                ) {
+                                    if (isTBitParam) {
+                                        // Квадрат 18×18 dp прижат к правому краю.
+                                        // Граница всегда onSurface — читается на светлой
+                                        // и тёмной теме, а также на подсвеченной карточке
+                                        // (primaryContainer).
+                                        Box(
+                                            modifier = Modifier
+                                                .size(18.dp)
+                                                .border(
+                                                    width = 2.dp,
+                                                    color = MaterialTheme.colorScheme.onSurface
+                                                )
+                                                .background(
+                                                    color = if (bitRaw) {
+                                                        MaterialTheme.colorScheme.onSurface
+                                                    } else {
+                                                        Color.Transparent
+                                                    }
+                                                )
+                                        )
+                                    } else {
+                                        Text(
+                                            text = valueText,
+                                            fontWeight = FontWeight.Bold,
+                                            fontSize = 14.sp,
+                                            textAlign = TextAlign.End
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
+                }
+            }
+
+            // =================================================================
+            // БАННЕР "НЕТ СВЯЗИ"
+            // =================================================================
+            // Показывается, когда ParametersViewModel зафиксировала
+            // FAILURES_BEFORE_NO_CONNECTION провалов подряд. Исчезает
+            // автоматически при первом успешном цикле.
+            if (parametersViewModel.pollingState == PollingState.NoConnection) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer
+                    )
+                ) {
+                    Text(
+                        text = "Нет связи",
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        textAlign = TextAlign.Center,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 14.sp
+                    )
                 }
             }
         }
     }
 
     // =========================================================================
-    // ДИАЛОГ ОПИСАНИЯ
+    // ДИАЛОГ ОПИСАНИЯ (F1)
     // =========================================================================
-    // Размещается ПОСЛЕ Scaffold, но в том же Composable, поэтому рисуется
-    // поверх всего содержимого — это стандартный приём в Compose для диалогов.
-    //
-    // Условие показа:
-    //   1) descriptionText != null — пользователь нажал F1 и описание есть;
-    //   2) currentParam != null — защита от рассогласования: если selectedKey
-    //      почему-то указывает на несуществующий параметр (например, INI-файл
-    //      перечитался и параметр исчез), диалог не откроется.
-    //
-    // Так как AlertDialog модальный, пользователь не сможет изменить
-    // selectedKey, пока диалог открыт — это гарантирует, что currentParam
-    // останется тем же параметром, для которого показано описание.
+    // Рисуется поверх содержимого — стандартный приём в Compose.
+    // Условие: descriptionText != null (кнопка F1 установила его) и
+    // currentParam != null (защита от рассогласования selectedKey ↔ параметр).
     val currentParam = page.parameters.find { it.key == selectedKey }
     if (descriptionText != null && currentParam != null) {
         AlertDialog(
-            // onDismissRequest — вызывается при тапе вне диалога
-            // и при нажатии системной кнопки "Назад".
-            // Закрываем диалог — обнуляем descriptionText.
             onDismissRequest = { descriptionText = null },
-            // Заголовок диалога — имя параметра без единицы измерения.
-            // Мелкий (16sp) и нежирный — акцент должен быть на описании.
             title = {
                 Text(
                     text = currentParam.name,
@@ -276,10 +334,6 @@ fun ParametersScreen(
                     fontSize = 16.sp
                 )
             },
-            // Тело диалога — описание из INI-файла.
-            // Крупное (22sp) и жирное — главный смысловой элемент.
-            // "!!" безопасно, потому что строкой выше мы проверили
-            // descriptionText != null.
             text = {
                 Text(
                     text = descriptionText!!,
@@ -287,8 +341,6 @@ fun ParametersScreen(
                     fontSize = 22.sp
                 )
             },
-            // Единственная кнопка "OK". Делает то же самое, что onDismissRequest —
-            // закрывает диалог.
             confirmButton = {
                 TextButton(onClick = { descriptionText = null }) {
                     Text("OK")

@@ -18,11 +18,14 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.toRoute
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.intmash.modbus_scanner.ui.ConfigScreen
 import com.intmash.modbus_scanner.ui.FileBrowserScreen
 import com.intmash.modbus_scanner.ui.MainScreen
 import com.intmash.modbus_scanner.ui.MainViewModel
 import com.intmash.modbus_scanner.ui.ParametersScreen
+import com.intmash.modbus_scanner.ui.ParametersViewModel
+import com.intmash.modbus_scanner.ui.ParametersViewModelFactory
 import com.intmash.modbus_scanner.ui.SplashScreen
 import kotlinx.coroutines.delay
 
@@ -114,8 +117,26 @@ fun AppNavHost(
             val route: ParametersRoute = backStackEntry.toRoute()
             val page = viewModel.pages.find { it.id == route.pageId }
             if (page != null) {
+                // Создаём ViewModel параметров через фабрику, привязанную к этому
+                // back stack entry. key = pageId гарантирует, что при переходах
+                // между страницами у каждой будет свой экземпляр VM (и свой опрос).
+                val parametersViewModel: ParametersViewModel = viewModel(
+                    key = "parameters_${route.pageId}",
+                    factory = ParametersViewModelFactory(
+                        repository = viewModel.repository,
+                        page = page
+                    )
+                )
+                // Запускаем опрос при входе на экран. Останавливается автоматически,
+                // когда экземпляр VM уничтожается (onCleared при выходе из back stack).
+                // LaunchedEffect с ключом = parametersViewModel: срабатывает один раз
+                // при создании композиции и повторно — только если VM поменяется.
+                LaunchedEffect(parametersViewModel) {
+                    parametersViewModel.startPolling()
+                }
                 ParametersScreen(
                     page = page,
+                    parametersViewModel = parametersViewModel,
                     onBack = { navController.popBackStack() }
                 )
             } else {

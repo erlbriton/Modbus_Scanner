@@ -62,8 +62,14 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        // Если связи нет — прогоняем полное сканирование USB.
+        // Это покрывает сценарий "приложение было в фоне, контроллер переподключили".
+        // checkDevices() сам разберётся:
+        //  - если разрешение уже есть → сразу onDeviceReady (подключение);
+        //  - если разрешения нет → запросит его у пользователя;
+        //  - если устройств нет → ничего не делает.
         if (!viewModel.isConnected) {
-            usbConnection.tryFallback()
+            usbConnection.checkDevices()
         }
     }
 
