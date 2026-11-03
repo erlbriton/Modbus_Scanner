@@ -1,3 +1,5 @@
+// ModbusRepository.kt
+
 package com.intmash.modbus_scanner.data
 
 import android.hardware.usb.UsbDevice
@@ -312,6 +314,173 @@ class ModbusRepository {
             result[i] = (hi shl 8) or lo
         }
         return result
+    }
+
+    /**
+     * Записывает N 16-битных регистров начиная с адреса [startRegister]
+     * по протоколу Modbus RTU, функция 0x10 (Write Multiple Registers).
+     *
+     * Это основной запрос для записи параметров. Один запрос может записать
+     * до 123 регистров за раз. Используется:
+     *  - напрямую для TWord/TDWord/TFloat (один регистр или два);
+     *  - для TByte/TBit — в связке с Read-Modify-Write (сначала прочитать,
+     *    изменить бит/байт, потом записать весь регистр через этот метод).
+     *
+     * Формат запроса:
+     *   [slave][0x10][startHi][startLo][countHi][countLo][byteCount][data...][CRC]
+     * Формат ответа (эхо заголовка):
+     *   [slave][0x10][startHi][startLo][countHi][countLo][CRC]  — ровно 8 байт.
+     *
+     * @param slaveAddr Адрес подчинённого устройства. Пока всегда 1.
+     * @param startRegister Начальный адрес (0x0000..0xFFFF).
+     * @param values Массив значений (каждое 0..0xFFFF, младшие 16 бит).
+     * @return true при успехе (контроллер подтвердил запись), false при ошибке.
+     *         false возвращается и при "нет ответа", и при Modbus-исключении
+     *         (например, 0x02 "Illegal data address" — попытка записи в read-only).
+     */
+    fun writeHoldingRegisters(slaveAddr: Int, startRegister: Int, values: IntArray): Boolean {
+        val port = usbPort ?: run {
+            Log.e("ModbusRepository", "writeHoldingRegisters(): usbPort == null")
+            return false
+        }
+
+        val count = values.size
+        if (count < 1 || count > 123) {
+            Log.e("ModbusRepository", "writeHoldingRegisters(): некорректный count=$count")
+            return false
+        }
+
+        // Тело запроса функции 0x10:
+        // [slave][0x10][startHi][startLo][countHi][countLo][byteCount][dataHi0][dataLo0]...
+        val bodySize = 7 + count * 2
+        val request = ByteArray(bodySize)
+        request[0] = (slaveAddr and 0xFF).toByte()
+        request[1] = 0x10.toByte()
+        request[2] = ((startRegister shr 8) and 0xFF).toByte()
+        request[3] = (startRegister and 0xFF).toByte()
+        request[4] = ((count shr 8) and 0xFF).toByte()
+        request[5] = (count and 0xFF).toByte()
+        request[6] = (count * 2).toByte()  // byteCount
+        for (i in 0 until count) {
+            val v = values[i] and 0xFFFF
+            request[7 + i * 2] = ((v shr 8) and 0xFF).toByte()
+            request[7 + i * 2 + 1] = (v and 0xFF).toByte()
+        }
+        val crc = calculateCRC16(request)
+        val fullRequest = request + crc
+
+        try {
+            // Чистим буфер от "хвостов" предыдущих обменов.
+            drainPort(port)
+            Thread.sleep(5)
+            port.purgeHwBuffers(true, true)
+
+            port.write(fullRequest, 1000)
+            Log.e(
+                "ModbusRepository",
+                "0x10 → slave=$slaveAddr, reg=0x%04X, count=$count, пакет: %s".format(
+                    startRegister,
+                    fullRequest.joinToString(" ") { "%02X".format(it) }
+                )
+            )
+
+            // Ответ на запись 0x10 — фиксированной длины 8 байт (эхо заголовка + CRC).
+            val expectedTotalLength = 8
+
+            val startTime = System.currentTimeMillis()
+            // Таймаут записи — 500 мс (по договорённости). Стирание FLASH-ячейки
+            // может занимать дольше, чем чтение; 500 мс — компромисс.
+            val timeoutMs = 500L
+            val accumulatedData = ByteArrayOutputStream()
+            val readBuffer = ByteArray(64)
+
+            while (System.currentTimeMillis() - startTime < timeoutMs) {
+                val remainingTime = (timeoutMs - (System.currentTimeMillis() - startTime))
+                    .toInt().coerceAtLeast(50)
+                val bytesRead = port.read(readBuffer, remainingTime)
+
+                if (bytesRead > 0) {
+                    accumulatedData.write(readBuffer, 0, bytesRead)
+                    val currentBytes = accumulatedData.toByteArray()
+                    Log.e(
+                        "ModbusRepository",
+                        "0x10 ← принято $bytesRead байт, всего ${currentBytes.size}: ${
+                            currentBytes.joinToString(" ") { "%02X".format(it) }
+                        }"
+                    )
+
+                    // Modbus Exception: старший бит байта функции = 1 (0x90 для 0x10).
+                    // Формат ответа-исключения: [slave][0x90][exceptionCode][CRC16].
+                    if (currentBytes.size >= 5 && (currentBytes[1].toInt() and 0x80) != 0) {
+                        val exceptionCode = currentBytes[2].toInt() and 0xFF
+                        Log.e(
+                            "ModbusRepository",
+                            "Modbus Exception при записи: func=0x%02X, code=0x%02X".format(
+                                currentBytes[1].toInt() and 0xFF,
+                                exceptionCode
+                            )
+                        )
+                        drainPort(port)
+                        return false
+                    }
+
+                    if (currentBytes.size >= expectedTotalLength) {
+                        drainPort(port)
+                        return parseWriteResponse(currentBytes, slaveAddr, startRegister, count)
+                    }
+                }
+            }
+            Log.w("ModbusRepository", "writeHoldingRegisters: таймаут")
+        } catch (e: Exception) {
+            Log.e("ModbusRepository", "writeHoldingRegisters: ошибка: ${e.message}")
+        }
+        return false
+    }
+
+    /**
+     * Разбирает ответ на запрос 0x10 и проверяет, что контроллер подтвердил запись.
+     *
+     * Ответ 0x10 — это эхо заголовка запроса без данных:
+     *   [slave][0x10][startHi][startLo][countHi][countLo][CRC16_lo][CRC16_hi]
+     *
+     * Проверяем:
+     *  - slave совпадает;
+     *  - func == 0x10 (исключения уже отсеяны в writeHoldingRegisters);
+     *  - startRegister и count в ответе совпадают с тем, что мы отправили.
+     *
+     * CRC не пересчитываем: контроллер уже ответил, физически данные дошли.
+     * Если бы CRC был неверный, большинство устройств вообще не отвечают.
+     */
+    private fun parseWriteResponse(
+        data: ByteArray,
+        expectedSlave: Int,
+        expectedStart: Int,
+        expectedCount: Int
+    ): Boolean {
+        val slave = data[0].toInt() and 0xFF
+        if (slave != expectedSlave) {
+            Log.e("ModbusRepository", "0x10: неверный slave в ответе: $slave")
+            return false
+        }
+
+        val func = data[1].toInt() and 0xFF
+        if (func != 0x10) {
+            Log.e("ModbusRepository", "0x10: неверный func в ответе: 0x%02X".format(func))
+            return false
+        }
+
+        val respStart = ((data[2].toInt() and 0xFF) shl 8) or (data[3].toInt() and 0xFF)
+        val respCount = ((data[4].toInt() and 0xFF) shl 8) or (data[5].toInt() and 0xFF)
+        if (respStart != expectedStart || respCount != expectedCount) {
+            Log.e(
+                "ModbusRepository",
+                "0x10: несовпадение эха: start=0x%04X/$expectedStart, count=$respCount/$expectedCount"
+                    .format(respStart)
+            )
+            return false
+        }
+        Log.e("ModbusRepository", "0x10: запись подтверждена контроллером")
+        return true
     }
 
     /**

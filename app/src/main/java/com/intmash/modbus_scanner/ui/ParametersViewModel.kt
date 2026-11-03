@@ -1,3 +1,4 @@
+// app/src/main/java/com/intmash/modbus_scanner/ui/ParametersViewModel.kt
 package com.intmash.modbus_scanner.ui
 
 import android.util.Log
@@ -8,11 +9,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.intmash.modbus_scanner.data.BytePart
 import com.intmash.modbus_scanner.data.DecodedValue
+import com.intmash.modbus_scanner.data.EncodePlan
 import com.intmash.modbus_scanner.data.ModbusParameter
 import com.intmash.modbus_scanner.data.ModbusRepository
 import com.intmash.modbus_scanner.data.PageInfo
 import com.intmash.modbus_scanner.data.ValueDecoder
+import com.intmash.modbus_scanner.data.ValueEncoder
 import com.intmash.modbus_scanner.data.toModbusParameters
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -27,13 +31,13 @@ import kotlinx.coroutines.withContext
  * Отвечает за:
  *  - фоновый опрос параметров страницы через Modbus;
  *  - хранение последних прочитанных значений ([values]) для отображения в UI;
- *  - отслеживание состояния связи ([pollingState]).
+ *  - отслеживание состояния связи ([pollingState]);
+ *  - запись одного параметра в контроллер ([writeParameter]).
  *
  * НЕ отвечает за:
  *  - открытие/закрытие USB-порта (это делает [MainViewModel] через
  *    [ModbusRepository.openPort]). К моменту создания этой VM порт уже открыт.
  *  - UI — это делает [ParametersScreen].
- *  - запись параметров — появится позже, в этом же классе.
  *
  * Один экземпляр на один экран ParametersScreen (один маршрут навигации).
  * При переходе на другую страницу создаётся новый экземпляр с другим [page].
@@ -58,7 +62,7 @@ class ParametersViewModel(
      * триггерит перерисовку Composable, которые её читают. UI просто читает
      * `values[param.key]` и не думает про подписки и LiveData.
      *
-     * Если параметр ещё не прочитан — ключа в Map нет. UI должен трактовать
+     * Если параметр ещё не прочитан — ключа в Map нет. UI трактует
      * отсутствие как "---" (нет данных).
      */
     val values: SnapshotStateMap<String, DecodedValue> = mutableStateMapOf()
@@ -90,10 +94,6 @@ class ParametersViewModel(
      * Пример для "Основные данные" (r0004..r0009):
      *   [ReadRequest(0x0004, 6, [Uref, Ilim, Uout, Iout, tRun, WRun])]
      * — один запрос вместо шести.
-     *
-     * Пример для "Уставки связи" (RS485_DVA rF000, RS485_BPS rF001,
-     * USB_DVA rF002, USB_BPS rF003):
-     *   [ReadRequest(0xF000, 4, [все 4 параметра])]
      */
     private val groupedRequests: List<ReadRequest> =
         groupIntoRequests(page.toModbusParameters())
@@ -129,8 +129,178 @@ class ParametersViewModel(
         Log.e("PARAM_POLL", "Опрос остановлен")
     }
 
+    /**
+     * Записывает значение параметра в контроллер.
+     *
+     * Вызывается из UI (кнопка "Записать" в диалоге). Выполняется в фоне:
+     *  - приостанавливает опрос, чтобы Modbus-обмен записью не пересекался
+     *    с циклами чтения;
+     *  - вычисляет план записи через [ValueEncoder];
+     *  - выполняет Modbus-операции (напрямую или read-modify-write);
+     *  - возобновляет опрос;
+     *  - сообщает результат через [onResult] на UI-потоке.
+     *
+     * Важно: обновление значений в [values] не делается здесь — это
+     * сделает следующий цикл опроса через ~200 мс. Так мы не доверяем
+     * "оптимистичному" обновлению, а видим реальное подтверждённое значение
+     * из контроллера. Если контроллер ограничил значение (например, обрезал
+     * по своим пределам), пользователь увидит это сразу.
+     *
+     * @param param Параметр для записи (содержит тип, адрес, масштаб).
+     * @param humanValue Значение в "человеческом" виде (то, что ввёл
+     *                   пользователь: 220.5 для Uref, 4.0 для "115200" и т.д.).
+     * @param onResult Колбэк результата:
+     *                 - `null` — успех;
+     *                 - строка — текст ошибки для показа пользователю.
+     *                 Всегда вызывается на Dispatchers.Main.
+     */
+    fun writeParameter(
+        param: ModbusParameter,
+        humanValue: Double,
+        onResult: (String?) -> Unit
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            // 1. Останавливаем опрос на время записи.
+            val wasPolling = pollingJob?.isActive == true
+            if (wasPolling) stopPolling()
+
+            var errorMessage: String? = null
+
+            try {
+                // 2. Строим план записи.
+                val plan = ValueEncoder.plan(param, humanValue)
+                Log.e("PARAM_WRITE", "План для ${param.name}=$humanValue: $plan")
+
+                // 3. Выполняем план в зависимости от типа.
+                errorMessage = when (plan) {
+                    is EncodePlan.Error -> plan.message
+                    is EncodePlan.WriteDirect -> executeWriteDirect(param, plan)
+                    is EncodePlan.WriteBit -> executeWriteBit(param, plan)
+                    is EncodePlan.WriteByte -> executeWriteByte(param, plan)
+                }
+            } catch (e: Exception) {
+                Log.e("PARAM_WRITE", "Исключение при записи ${param.name}: ${e.message}")
+                errorMessage = "Ошибка записи: ${e.message ?: "неизвестная"}"
+            } finally {
+                // 4. Возобновляем опрос (даже если была ошибка — экран должен
+                //    продолжать обновлять значения).
+                if (wasPolling) startPolling()
+
+                // 5. Возвращаемся на UI-поток и сообщаем результат.
+                withContext(Dispatchers.Main) {
+                    onResult(errorMessage)
+                }
+            }
+        }
+    }
+
     // =========================================================================
-    // ВНУТРЕННЯЯ ЛОГИКА
+    // ВЫПОЛНЕНИЕ ПЛАНОВ ЗАПИСИ
+    // =========================================================================
+
+    /**
+     * Прямая запись: всё уже упаковано в план, отправляем одним запросом 0x10.
+     */
+    private fun executeWriteDirect(param: ModbusParameter, plan: EncodePlan.WriteDirect): String? {
+        val success = repository.writeHoldingRegisters(
+            slaveAddr = SLAVE_ADDRESS,
+            startRegister = plan.startRegister,
+            values = plan.values
+        )
+        return if (success) {
+            Log.e("PARAM_WRITE", "Запись ${param.name} успешна")
+            null
+        } else {
+            "Ошибка записи ${param.name}: контроллер не подтвердил"
+        }
+    }
+
+    /**
+     * Запись бита через read-modify-write.
+     *
+     * Последовательность:
+     *  1. Прочитать регистр (0x03) — текущее значение всех 16 бит.
+     *  2. Изменить только нужный бит по маске.
+     *  3. Записать весь регистр обратно (0x10).
+     *
+     * Почему не пишем регистр целиком вслепую: в том же регистре могут
+     * быть другие флаги, которые мы бы случайно затёрли. Read-modify-write
+     * сохраняет остальные биты неизменными.
+     */
+    private fun executeWriteBit(param: ModbusParameter, plan: EncodePlan.WriteBit): String? {
+        // 1. Читаем текущее значение регистра.
+        val registers = repository.readHoldingRegisters(
+            slaveAddr = SLAVE_ADDRESS,
+            startRegister = plan.register,
+            count = 1
+        ) ?: return "Ошибка записи ${param.name}: контроллер не отвечает на чтение"
+
+        val current = registers[0] and 0xFFFF
+        // 2. Меняем только нужный бит по маске.
+        val mask = 1 shl plan.bitNumber
+        val newValue = if (plan.bitValue) {
+            current or mask       // установить бит
+        } else {
+            current and mask.inv() // сбросить бит
+        }
+
+        // 3. Пишем весь регистр обратно.
+        val success = repository.writeHoldingRegisters(
+            slaveAddr = SLAVE_ADDRESS,
+            startRegister = plan.register,
+            values = intArrayOf(newValue)
+        )
+        return if (success) {
+            Log.e(
+                "PARAM_WRITE",
+                "Запись ${param.name}: reg=0x%04X, бит ${plan.bitNumber} → ${plan.bitValue}"
+                    .format(plan.register)
+            )
+            null
+        } else {
+            "Ошибка записи ${param.name}: контроллер не подтвердил"
+        }
+    }
+
+    /**
+     * Запись байта через read-modify-write.
+     *
+     * Аналогично биту, только сохраняем соседний байт. Например,
+     * при записи младшего байта (Low) старший байт регистра должен
+     * остаться неизменным — иначе затрём соседний параметр.
+     */
+    private fun executeWriteByte(param: ModbusParameter, plan: EncodePlan.WriteByte): String? {
+        val registers = repository.readHoldingRegisters(
+            slaveAddr = SLAVE_ADDRESS,
+            startRegister = plan.register,
+            count = 1
+        ) ?: return "Ошибка записи ${param.name}: контроллер не отвечает на чтение"
+
+        val current = registers[0] and 0xFFFF
+        val newValue = when (plan.part) {
+            BytePart.Low -> (current and 0xFF00) or (plan.byteValue and 0xFF)
+            BytePart.High -> (current and 0x00FF) or ((plan.byteValue and 0xFF) shl 8)
+        }
+
+        val success = repository.writeHoldingRegisters(
+            slaveAddr = SLAVE_ADDRESS,
+            startRegister = plan.register,
+            values = intArrayOf(newValue)
+        )
+        return if (success) {
+            Log.e(
+                "PARAM_WRITE",
+                "Запись ${param.name}: reg=0x%04X, ${plan.part} байт → 0x%02X"
+                    .format(plan.register, plan.byteValue)
+            )
+            null
+        } else {
+            "Ошибка записи ${param.name}: контроллер не подтвердил"
+        }
+    }
+
+    // =========================================================================
+    // ВНУТРЕННЯЯ ЛОГИКА ОПРОСА
     // =========================================================================
 
     /**
@@ -142,10 +312,6 @@ class ParametersViewModel(
      *     счётчик провалов растёт, ждём 500 мс (не спамим).
      *  2. Если все запросы успешны — счётчик сбрасывается, ждём 50 мс.
      *  3. Между запросами внутри цикла — пауза 50 мс, чтобы не забивать порт.
-     *
-     * Обновления [values] делаются на Dispatchers.Main (батчем на пакет),
-     * чтобы Compose гарантированно увидел изменения и не было гонок
-     * между UI-потоком и IO-потоком.
      */
     private suspend fun runOneCycle() {
         var hadFailure = false
@@ -166,8 +332,6 @@ class ParametersViewModel(
                 break
             }
 
-            // Декодируем все параметры этого пакета и накапливаем в batch,
-            // чтобы одним withContext(Dispatchers.Main) переключиться и записать всё.
             val batchUpdates = mutableMapOf<String, DecodedValue>()
             for (pw in request.params) {
                 val decoded = ValueDecoder.decode(pw.param, registers, pw.offset)
@@ -181,9 +345,6 @@ class ParametersViewModel(
                 }
             }
 
-            // Пауза между запросами внутри цикла. 50 мс — компромисс между
-            // скоростью и нагрузкой на контроллер. По результатам тестов
-            // можно уменьшить (если контроллер успевает) или увеличить.
             delay(50)
         }
 
@@ -194,15 +355,12 @@ class ParametersViewModel(
                     pollingState = PollingState.NoConnection
                 }
             }
-            // При ошибке — пауза побольше, чтобы не спамить контроллер.
             delay(500)
         } else {
             consecutiveFailures = 0
             withContext(Dispatchers.Main) {
                 pollingState = PollingState.Polling
             }
-            // Минимальный межцикловый интервал. Без него цикл съедает 100% CPU
-            // и не даёт порту "продышаться" между циклами.
             delay(50)
         }
     }
@@ -247,9 +405,6 @@ data class ReadRequest(
 /**
  * Параметр + смещение внутри массива регистров пакета.
  * offset измеряется в регистрах (не в байтах).
- *
- * Пример: пакет r0004..r0009, параметр Ilim (r0005) → offset = 1.
- * ValueDecoder.decode(Ilim, registers, offset=1) возьмёт registers[1].
  */
 data class ParamWithOffset(
     val param: ModbusParameter,
@@ -258,34 +413,16 @@ data class ParamWithOffset(
 
 /**
  * Группирует параметры в минимальное количество Modbus-запросов.
- *
- * Принцип: соседние (подряд идущие) регистры объединяются в один запрос.
- * Если следующий параметр начинается сразу за предыдущим — склеиваем.
- * Если есть разрыв — создаём новый запрос.
- *
- * Пример: "Основные данные" (Uref r0004, Ilim r0005, Uout r0006, ...).
- *   Все идут подряд → один ReadRequest(0x0004, 6, [6 параметров]).
- *
- * Пример: "Уставки связи" (RS485_DVA rF000, RS485_BPS rF001,
- * USB_DVA rF002, USB_BPS rF003):
- *   Все подряд → один ReadRequest(0xF000, 4, [4 параметра]).
- *
- * Ограничение Modbus: один запрос максимум 125 регистров. Если пакет
- * получается больше — разбивается на несколько.
- *
- * @param params Параметры страницы. Пустой список → пустой результат.
- * @return Список запросов с параметрами, привязанными к смещениям.
+ * Соседние (подряд идущие) регистры объединяются в один запрос.
+ * Ограничение Modbus — 125 регистров на запрос.
  */
 private fun groupIntoRequests(params: List<ModbusParameter>): List<ReadRequest> {
     if (params.isEmpty()) return emptyList()
 
-    // Сортируем по адресу регистра. В INI параметры могут идти в любом
-    // порядке, а группировать удобнее по возрастанию адресов.
     val sorted = params.sortedBy { it.address.number }
 
     val result = mutableListOf<ReadRequest>()
 
-    // Текущий открытый пакет.
     var packetStart = sorted[0].address.number
     var packetEnd = packetStart + sorted[0].registerCount
     var packetParams = mutableListOf(ParamWithOffset(sorted[0], 0))
@@ -295,11 +432,7 @@ private fun groupIntoRequests(params: List<ModbusParameter>): List<ReadRequest> 
         val pStart = p.address.number
         val pEnd = pStart + p.registerCount
 
-        // Склеиваем, если следующий регистр идёт сразу за текущим пакетом
-        // (pStart == packetEnd) или перекрывается (pStart < packetEnd,
-        // например, два TBit в одном регистре).
         if (pStart <= packetEnd) {
-            // Пакет уже достиг лимита Modbus — вынужденно начинаем новый.
             if (pEnd - packetStart > MAX_REGISTERS_PER_REQUEST) {
                 result.add(ReadRequest(packetStart, packetEnd - packetStart, packetParams))
                 packetStart = pStart
@@ -310,7 +443,6 @@ private fun groupIntoRequests(params: List<ModbusParameter>): List<ReadRequest> 
                 if (pEnd > packetEnd) packetEnd = pEnd
             }
         } else {
-            // Разрыв — закрываем текущий пакет, начинаем новый.
             result.add(ReadRequest(packetStart, packetEnd - packetStart, packetParams))
             packetStart = pStart
             packetEnd = pEnd
@@ -318,7 +450,6 @@ private fun groupIntoRequests(params: List<ModbusParameter>): List<ReadRequest> 
         }
     }
 
-    // Закрываем последний пакет.
     result.add(ReadRequest(packetStart, packetEnd - packetStart, packetParams))
     return result
 }

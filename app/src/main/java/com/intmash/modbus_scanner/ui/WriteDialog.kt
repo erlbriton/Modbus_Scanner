@@ -1,4 +1,4 @@
-//  app/src/main/java/com/intmash/modbus_scanner/ui/WriteDialog.kt
+// app/src/main/java/com/intmash/modbus_scanner/ui/WriteDialog.kt
 package com.intmash.modbus_scanner.ui
 
 import androidx.compose.foundation.layout.Arrangement
@@ -35,9 +35,10 @@ import com.intmash.modbus_scanner.data.ModbusType
  * WriteDialog — модальный диалог записи одного параметра в контроллер.
  *
  * Показывает:
- *  - заголовок с именем параметра (Uref, USB_BPS, Ready и т.д.);
- *  - текущее значение (справочно, чтобы пользователь видел, от чего отталкивается);
+ *  - заголовок с именем параметра;
+ *  - текущее значение (справочно);
  *  - редактор нового значения (тип редактора зависит от типа параметра);
+ *  - при ошибке записи — красный текст под полем;
  *  - кнопки «Отмена» и «Записать».
  *
  * Устроен как "роутер по типу": сам не рисует UI, а вызывает специализированный
@@ -45,30 +46,26 @@ import com.intmash.modbus_scanner.data.ModbusType
  * отдельно, а добавление нового типа сводится к новой ветке when и одной
  * новой Composable-функции.
  *
- * Реальная отправка Modbus-запроса на этом шаге НЕ делается: [onConfirm]
- * только сообщает вызывающему коду, что пользователь ввёл такое-то значение.
- * Логика записи (преобразование в регистры, отправка, обработка ошибок)
- * появится отдельным шагом — так проще отлаживать UI и логику по отдельности.
- *
- * @param param Описание параметра, готовое к Modbus-операциям. Содержит
- *              имя, единицу, тип, масштаб и (для TPrmList) словарь значений.
- * @param currentValue Текущее декодированное значение. Может быть null,
- *                     если первый опрос ещё не завершился — тогда диалог
- *                     откроется с пустым полем (или без предвыбранного варианта).
- * @param onDismiss Колбэк закрытия диалога без записи (кнопка «Отмена»,
- *                  тап вне диалога, системная кнопка «Назад»).
+ * @param param Описание параметра, готовое к Modbus-операциям.
+ * @param currentValue Текущее декодированное значение (для предзаполнения).
+ *                     null, если первый опрос ещё не завершился.
+ * @param errorMessage Текст ошибки записи от ViewModel. Показывается красным
+ *                     под полем ввода. null — ошибки нет (или только что
+ *                     открыли/повторили попытку).
+ * @param onDismiss Колбэк закрытия диалога без записи.
  * @param onConfirm Колбэк подтверждения. Получает значение в "человеческом"
  *                  виде:
- *                    - числовые типы: значение пользователя (например, 220.5);
- *                    - TPrmList:     ключ из словаря (например, 4.0 для «115200»);
- *                    - TBit:         0.0 или 1.0.
- *                  Обратное преобразование в "сырые" регистры — задача
- *                  вызывающего кода (следующий шаг).
+ *                    - числовые: значение пользователя (220.5);
+ *                    - TPrmList: ключ из словаря (4.0 для «115200»);
+ *                    - TBit:     0.0 или 1.0.
+ *                  Обратное преобразование в регистры — в ValueEncoder
+ *                  (вызывается из ViewModel через onConfirm выше).
  */
 @Composable
 fun WriteDialog(
     param: ModbusParameter,
     currentValue: DecodedValue?,
+    errorMessage: String?,
     onDismiss: () -> Unit,
     onConfirm: (Double) -> Unit
 ) {
@@ -76,11 +73,17 @@ fun WriteDialog(
         ModbusType.TWord,
         ModbusType.TByte,
         ModbusType.TDWord,
-        ModbusType.TFloat -> WriteNumberDialog(param, currentValue, onDismiss, onConfirm)
+        ModbusType.TFloat -> WriteNumberDialog(
+            param, currentValue, errorMessage, onDismiss, onConfirm
+        )
 
-        ModbusType.TPrmList -> WritePrmListDialog(param, currentValue, onDismiss, onConfirm)
+        ModbusType.TPrmList -> WritePrmListDialog(
+            param, currentValue, errorMessage, onDismiss, onConfirm
+        )
 
-        ModbusType.TBit -> WriteBitDialog(param, currentValue, onDismiss, onConfirm)
+        ModbusType.TBit -> WriteBitDialog(
+            param, currentValue, errorMessage, onDismiss, onConfirm
+        )
     }
 }
 
@@ -91,29 +94,31 @@ fun WriteDialog(
 /**
  * Диалог ввода числового значения.
  *
- * Поле предзаполняется текущим значением (если оно есть) — пользователь
- * может стереть и ввести новое, или слегка поправить существующее.
+ * Поле предзаполняется текущим значением. Клавиатура — Decimal
+ * (разрешает цифры, точку, запятую). При подтверждении запятая
+ * заменяется точкой. Масштаб применяется позже (в ValueEncoder).
  *
- * Клавиатура — `KeyboardType.Decimal`: разрешает ввод цифр, точки и запятой.
- * При подтверждении запятая заменяется на точку (для единообразия парсинга).
- *
- * Масштаб (÷10, ÷100 и т.д.) здесь не применяется — пользователь вводит
- * "человеческое" значение (220.5 В), а не сырое (2205). Приведение к сырому
- * значению с учётом `param.scale` будет на шаге записи.
+ * Ошибки могут быть двух типов:
+ *  - локальная валидация: "Введите число" (текст в поле не парсится);
+ *  - ошибка записи от ViewModel: например, "Значение вне диапазона".
+ * Показываются по очереди: сначала локальная (пока пользователь не ввёл
+ * валидное число), потом ошибка записи (приходит от контроллера).
  */
 @Composable
 private fun WriteNumberDialog(
     param: ModbusParameter,
     currentValue: DecodedValue?,
+    errorMessage: String?,
     onDismiss: () -> Unit,
     onConfirm: (Double) -> Unit
 ) {
-    // Предзаполнение поля текущим значением.
-    // DecodedValue.Number.display уже отформатирован с правильным числом
-    // знаков после запятой (например, "219.9"), парсится обратно без потерь.
     val initialText = (currentValue as? DecodedValue.Number)?.display ?: ""
     var inputText by remember { mutableStateOf(initialText) }
-    var errorText by remember { mutableStateOf<String?>(null) }
+    var localError by remember { mutableStateOf<String?>(null) }
+
+    // Что показать под полем: локальная валидация приоритетнее.
+    // Если её нет — показываем ошибку записи от ViewModel.
+    val displayedError = localError ?: errorMessage
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -130,13 +135,13 @@ private fun WriteNumberDialog(
                     value = inputText,
                     onValueChange = {
                         inputText = it
-                        errorText = null  // сбрасываем ошибку при вводе
+                        localError = null  // сбрасываем локальную ошибку при вводе
                     },
                     label = { Text("Новое значение") },
-                    isError = errorText != null,
+                    isError = displayedError != null,
                     supportingText = {
-                        if (errorText != null) {
-                            Text(errorText!!, color = MaterialTheme.colorScheme.error)
+                        if (displayedError != null) {
+                            Text(displayedError, color = MaterialTheme.colorScheme.error)
                         }
                     },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
@@ -148,11 +153,9 @@ private fun WriteNumberDialog(
         },
         confirmButton = {
             TextButton(onClick = {
-                // Заменяем запятую на точку — пользователи вводят по-разному.
-                // toDoubleOrNull вернёт null, если строка не число.
                 val parsed = inputText.trim().replace(',', '.').toDoubleOrNull()
                 if (parsed == null) {
-                    errorText = "Введите число"
+                    localError = "Введите число"
                 } else {
                     onConfirm(parsed)
                 }
@@ -175,26 +178,22 @@ private fun WriteNumberDialog(
 /**
  * Диалог выбора значения из списка (TPrmList).
  *
- * Например, для `USB_BPS` в INI заданы варианты x01#9600, x02#19200,
- * x03#57600, x04#115200. В диалоге — выпадающий список с этими вариантами,
- * выбранный вариант — ключ из словаря, который передаётся в onConfirm.
+ * Например, для `USB_BPS` в INI заданы варианты x01#9600..x04#115200.
+ * Поле readOnly — выбор только из выпадающего списка. Это защищает
+ * от опечаток.
  *
- * ExposedDropdownMenuBox — компонент Material3 для выпадающих списков.
- * Привязан к OutlinedTextField, но поле readOnly — ввод текста запрещён,
- * выбор только из списка. Это защищает от опечаток.
+ * Ошибка записи показывается красным текстом под полем.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun WritePrmListDialog(
     param: ModbusParameter,
     currentValue: DecodedValue?,
+    errorMessage: String?,
     onDismiss: () -> Unit,
     onConfirm: (Double) -> Unit
 ) {
     val pRmlist = param.pRmlist ?: emptyMap()
-
-    // Текущий выбранный ключ. При первом открытии — из currentValue,
-    // если оно задано. Иначе null (пользователь должен выбрать вариант).
     val initialKey = (currentValue as? DecodedValue.ListOption)?.raw
     var selectedKey by remember { mutableStateOf(initialKey) }
     var expanded by remember { mutableStateOf(false) }
@@ -218,9 +217,15 @@ private fun WritePrmListDialog(
                 ) {
                     OutlinedTextField(
                         value = selectedKey?.let { pRmlist[it] } ?: "",
-                        onValueChange = { /* read-only, изменения игнорируются */ },
+                        onValueChange = { /* read-only */ },
                         readOnly = true,
                         label = { Text("Новое значение") },
+                        isError = errorMessage != null,
+                        supportingText = {
+                            if (errorMessage != null) {
+                                Text(errorMessage, color = MaterialTheme.colorScheme.error)
+                            }
+                        },
                         trailingIcon = {
                             ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded)
                         },
@@ -232,8 +237,6 @@ private fun WritePrmListDialog(
                         expanded = expanded,
                         onDismissRequest = { expanded = false }
                     ) {
-                        // Сортируем по ключу — чтобы список отображался
-                        // в стабильном порядке (9600, 19200, 57600, 115200).
                         pRmlist.toSortedMap().forEach { (key, label) ->
                             DropdownMenuItem(
                                 text = { Text(label) },
@@ -253,7 +256,6 @@ private fun WritePrmListDialog(
                     val key = selectedKey
                     if (key != null) onConfirm(key.toDouble())
                 },
-                // Кнопка неактивна, пока ничего не выбрано.
                 enabled = selectedKey != null
             ) {
                 Text("Записать")
@@ -274,19 +276,17 @@ private fun WritePrmListDialog(
 /**
  * Диалог выбора бита (0/1).
  *
- * Основной способ записи TBit — тап по квадратику в карточке (реализуем
- * отдельным шагом). Этот диалог — резервный путь через долгий тап по
- * карточке: если пользователь промахнулся по маленькому квадратику,
- * он может открыть диалог и выбрать явно.
+ * Основной способ записи TBit — тап по квадратику в карточке (следующим
+ * шагом). Этот диалог — резервный путь через долгий тап: если пользователь
+ * промахнулся по квадратику, он может открыть диалог и выбрать явно.
  *
- * Две кнопки — «0» и «1». Выбранная подсвечена акцентным цветом,
- * вторая — нейтральным (surfaceVariant). Это даёт ясную визуальную
- * обратную связь без чекбоксов и радиокнопок.
+ * Две кнопки — «0» и «1». Выбранная акцентная, вторая нейтральная.
  */
 @Composable
 private fun WriteBitDialog(
     param: ModbusParameter,
     currentValue: DecodedValue?,
+    errorMessage: String?,
     onDismiss: () -> Unit,
     onConfirm: (Double) -> Unit
 ) {
@@ -309,7 +309,6 @@ private fun WriteBitDialog(
                         .padding(top = 8.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    // Кнопка "0": акцентная, если бит выбран в 0, иначе серая.
                     Button(
                         onClick = { selectedBit = false },
                         colors = if (!selectedBit) {
@@ -324,7 +323,6 @@ private fun WriteBitDialog(
                     ) {
                         Text("0")
                     }
-                    // Кнопка "1": акцентная, если бит выбран в 1, иначе серая.
                     Button(
                         onClick = { selectedBit = true },
                         colors = if (selectedBit) {
@@ -339,6 +337,14 @@ private fun WriteBitDialog(
                     ) {
                         Text("1")
                     }
+                }
+                if (errorMessage != null) {
+                    Text(
+                        text = errorMessage,
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
                 }
             }
         },

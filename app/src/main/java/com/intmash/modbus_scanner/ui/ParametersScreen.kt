@@ -1,7 +1,7 @@
 // app/src/main/java/com/intmash/modbus_scanner/ui/ParametersScreen.kt
+
 package com.intmash.modbus_scanner.ui
 
-import android.util.Log
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -103,6 +103,12 @@ fun ParametersScreen(
     // открытый диалог с введённым значением после поворота мог бы
     // привести к случайной записи, риск выше пользы.
     var writeParam by remember { mutableStateOf<ModbusParameter?>(null) }
+
+    // writeError — текст ошибки последней попытки записи, если провалилась.
+    // null = ошибки нет (или диалог закрыт/ещё не открывался).
+    // Не saveable: ошибка эфемерна, при повороте экрана сбрасывается
+    // (диалог всё равно закрывается). Показывается красным под полем.
+    var writeError by remember { mutableStateOf<String?>(null) }
 
     // =========================================================================
     // КОРНЕВОЙ КОНТЕЙНЕР
@@ -207,14 +213,14 @@ fun ParametersScreen(
                                 .fillMaxWidth()
                                 .combinedClickable(
                                     onClick = {
-                                        Log.e("TAP_TEST", "onClick: ${param.key} ${param.name}")
+                                      //  Log.e("TAP_TEST", "onClick: ${param.key} ${param.name}")
                                         selectedKey = if (isSelected) null else param.key
                                     },
                                     onLongClick = {
                                         // Разбираем ParameterInfo → ModbusParameter.
                                         // null (некорректное описание в INI) — диалог
                                         // не открываем.
-                                        Log.e("TAP_TEST", "onLongClick: ${param.key} ${param.name}")
+                                     //   Log.e("TAP_TEST", "onLongClick: ${param.key} ${param.name}")
                                         writeParam = ModbusParameterParser.parse(param)
                                     }
                                 ),
@@ -353,15 +359,31 @@ fun ParametersScreen(
         WriteDialog(
             param = writeParamValue,
             currentValue = parametersViewModel.values[writeParamValue.key],
-            onDismiss = { writeParam = null },
-            onConfirm = { value ->
-                Log.e(
-                    "WRITE_TEST",
-                    "Запись ${writeParamValue.name} = $value " +
-                            "(тип ${writeParamValue.type}, масштаб ${writeParamValue.scale}, " +
-                            "адрес ${writeParamValue.address}). Реальная запись пока не реализована."
-                )
+            errorMessage = writeError,
+            onDismiss = {
                 writeParam = null
+                writeError = null
+            },
+            onConfirm = { value ->
+                // Сбрасываем старую ошибку при новой попытке.
+                writeError = null
+                // Запускаем запись через ViewModel. Колбэк придёт на Main
+                // через ~0.3–1 с (пока идёт Modbus-обмен).
+                parametersViewModel.writeParameter(
+                    param = writeParamValue,
+                    humanValue = value
+                ) { error ->
+                    if (error == null) {
+                        // Успех — закрываем диалог. Значение в карточке
+                        // обновится через следующий цикл опроса (~200 мс).
+                        writeParam = null
+                        writeError = null
+                    } else {
+                        // Ошибка — оставляем диалог открытым,
+                        // показываем текст под полем.
+                        writeError = error
+                    }
+                }
             }
         )
     }
