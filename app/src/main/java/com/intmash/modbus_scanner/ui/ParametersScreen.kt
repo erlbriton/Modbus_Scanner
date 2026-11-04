@@ -221,7 +221,7 @@ fun ParametersScreen(
                                         // null (некорректное описание в INI) — диалог
                                         // не открываем.
                                      //   Log.e("TAP_TEST", "onLongClick: ${param.key} ${param.name}")
-                                        writeParam = ModbusParameterParser.parse(param)
+                                        writeParam = ModbusParameterParser.parse(param, page.variables)
                                     }
                                 ),
                             colors = CardDefaults.cardColors(

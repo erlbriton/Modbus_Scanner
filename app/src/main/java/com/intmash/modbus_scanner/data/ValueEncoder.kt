@@ -10,8 +10,8 @@ import kotlin.math.roundToLong
  * Превращает "человеческое" значение (то, что пользователь ввёл в диалоге
  * записи — Double) в "план" записи по Modbus. План — это декларативное
  * описание, что именно нужно сделать:
- *  - WriteDirect — записать один или два регистра напрямую (TWord, TDWord,
- *    TFloat, TPrmList на полном регистре);
+ *  - WriteDirect — записать один или два регистра напрямую (TWord, TInteger,
+ *    TDWord, TFloat, TPrmList на полном регистре);
  *  - WriteBit — установить/сбросить бит (TBit): требует read-modify-write,
  *    т.к. запись идёт на весь регистр, а нам нужен только один бит;
  *  - WriteByte — заменить младший/старший байт (TByte, TPrmList на байте):
@@ -21,11 +21,10 @@ import kotlin.math.roundToLong
  *
  * ValueEncoder НЕ работает с USB/Modbus. Он только вычисляет, что делать.
  * Выполнение плана — задача оркестратора ([com.intmash.modbus_scanner.ui.ParametersViewModel]).
- * Это разделение позволяет тестировать преобразование без живого контроллера.
  *
- * Масштаб применяется в обратную сторону, чем при чтении:
- *  - при чтении: human = raw / divisor;
- *  - при записи: raw  = human * divisor (и округление до целого).
+ * Применение масштаба — обратное декодированию:
+ *   при чтении: physical = raw × scaleFactor;
+ *   при записи: raw      = round(physical / scaleFactor).
  *
  * Проверка диапазонов критична: молча "обрезать" значение до максимума
  * (как сделал бы простой toInt()) — это скрытая ошибка. Пользователь
@@ -42,6 +41,7 @@ object ValueEncoder {
     fun plan(param: ModbusParameter, humanValue: Double): EncodePlan {
         return when (param.type) {
             ModbusType.TWord -> planWord(param, humanValue)
+            ModbusType.TInteger -> planInteger(param, humanValue)
             ModbusType.TDWord -> planDWord(param, humanValue)
             ModbusType.TFloat -> planFloat(param, humanValue)
             ModbusType.TByte -> planByte(param, humanValue)
@@ -56,14 +56,16 @@ object ValueEncoder {
 
     /**
      * TWord — один 16-битный беззнаковый регистр (0..0xFFFF).
-     * Значение пользователя умножается на divisor масштаба и округляется.
+     * Значение пользователя делится на scaleFactor и округляется.
+     *
+     * Пример: scaleFactor = 0.1, human = 220.5 → raw = 2205.
      */
     private fun planWord(param: ModbusParameter, value: Double): EncodePlan {
-        val raw = (value * param.scale.divisor).roundToLong()
+        val raw = (value / param.scaleFactor).roundToLong()
         if (raw < 0 || raw > 0xFFFF) {
-            val maxHuman = 0xFFFF / param.scale.divisor
+            val maxHuman = 0xFFFF * param.scaleFactor
             return EncodePlan.Error(
-                "Значение вне диапазона (0..$maxHuman${if (param.unit.isNotBlank()) " ${param.unit}" else ""})"
+                "Значение вне диапазона (0..${formatBound(maxHuman)}${if (param.unit.isNotBlank()) " ${param.unit}" else ""})"
             )
         }
         return EncodePlan.WriteDirect(
@@ -73,11 +75,36 @@ object ValueEncoder {
     }
 
     /**
+     * TInteger — один 16-битный регистр СО ЗНАКОМ (-32768..32767).
+     * Значение пользователя делится на scaleFactor и округляется.
+     * Проверка диапазона — по signed-диапазону Int16.
+     *
+     * Кодирование в регистр: отрицательные значения хранятся в дополнительном
+     * коде: -1 → 0xFFFF, -32768 → 0x8000. Это делается через `and 0xFFFF`.
+     *
+     * Пример: scaleFactor = 0.1, human = -10.0 → raw = -100 → encoded = 0xFF9C.
+     */
+    private fun planInteger(param: ModbusParameter, value: Double): EncodePlan {
+        val raw = (value / param.scaleFactor).roundToLong()
+        if (raw < -32768 || raw > 32767) {
+            val minHuman = -32768 * param.scaleFactor
+            val maxHuman = 32767 * param.scaleFactor
+            return EncodePlan.Error(
+                "Значение вне диапазона TInteger (${formatBound(minHuman)}..${formatBound(maxHuman)}${if (param.unit.isNotBlank()) " ${param.unit}" else ""})"
+            )
+        }
+        return EncodePlan.WriteDirect(
+            startRegister = param.address.number,
+            values = intArrayOf((raw.toInt() and 0xFFFF))
+        )
+    }
+
+    /**
      * TDWord — два 16-битных регистра (0..0xFFFFFFFF).
      * Порядок регистров совпадает с ValueDecoder.decodeDWord: старший первым.
      */
     private fun planDWord(param: ModbusParameter, value: Double): EncodePlan {
-        val raw = (value * param.scale.divisor).roundToLong()
+        val raw = (value / param.scaleFactor).roundToLong()
         if (raw < 0 || raw > 0xFFFFFFFFL) {
             return EncodePlan.Error("Значение вне диапазона TDWord (0..4294967295)")
         }
@@ -92,8 +119,8 @@ object ValueEncoder {
 
     /**
      * TFloat — IEEE 754 float в двух регистрах.
-     * У TFloat масштаба нет (parser выставил IntegerScale = 1.0),
-     * поэтому преобразование — просто упаковка float-битов в два регистра.
+     * У TFloat масштаб = 1.0 (установлено в ModbusParameterParser),
+     * поэтому деление на scaleFactor не искажает значение.
      */
     private fun planFloat(param: ModbusParameter, value: Double): EncodePlan {
         val bits = java.lang.Float.floatToRawIntBits(value.toFloat())
@@ -137,10 +164,10 @@ object ValueEncoder {
     private fun planByte(param: ModbusParameter, value: Double): EncodePlan {
         val address = param.address as? RegisterAddress.ByteField
             ?: return EncodePlan.Error("TByte: некорректный адрес (ожидался ByteField)")
-        val raw = (value * param.scale.divisor).roundToLong()
+        val raw = (value / param.scaleFactor).roundToLong()
         if (raw < 0 || raw > 0xFF) {
-            val maxHuman = 0xFF / param.scale.divisor
-            return EncodePlan.Error("Значение вне диапазона байта (0..$maxHuman)")
+            val maxHuman = 0xFF * param.scaleFactor
+            return EncodePlan.Error("Значение вне диапазона байта (0..${formatBound(maxHuman)})")
         }
         return EncodePlan.WriteByte(
             register = address.number,
@@ -195,6 +222,23 @@ object ValueEncoder {
             }
         }
     }
+
+    // =========================================================================
+    // ВСПОМОГАТЕЛЬНЫЕ
+    // =========================================================================
+
+    /**
+     * Форматирует границу диапазона для сообщения об ошибке: без лишних
+     * нулей после запятой. 220.0 → "220", 220.5 → "220.5".
+     * Используется только в Error.message.
+     */
+    private fun formatBound(value: Double): String {
+        return if (value == value.toLong().toDouble()) {
+            value.toLong().toString()
+        } else {
+            value.toString()
+        }
+    }
 }
 
 /**
@@ -215,7 +259,7 @@ sealed class EncodePlan {
 
     /**
      * Прямая запись [values] начиная с адреса [startRegister].
-     * Используется для TWord, TDWord, TFloat и TPrmList на полном регистре.
+     * Используется для TWord, TInteger, TDWord, TFloat и TPrmList на полном регистре.
      */
     data class WriteDirect(
         val startRegister: Int,

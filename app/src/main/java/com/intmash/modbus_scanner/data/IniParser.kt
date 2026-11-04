@@ -53,7 +53,8 @@ data class PageParameterRef(
 data class PageInfo(
     val id: String,
     val title: String,
-    val parameters: List<ParameterInfo>
+    val parameters: List<ParameterInfo>,
+    val variables: Map<String, Double>
 )
 
 /**
@@ -66,56 +67,133 @@ class IniParser {
     fun parsePages(context: Context, uri: Uri): List<PageInfo> {
         val pagesRaw = mutableListOf<Triple<String, String, List<PageParameterRef>>>()
         val parametersBySection = mutableMapOf<String, MutableMap<String, ParameterInfo>>()
+        val variables = mutableMapOf<String, Double>()
 
         try {
             context.contentResolver.openInputStream(uri)?.use { inputStream ->
-                BufferedReader(InputStreamReader(inputStream, Charset.forName("Windows-1251"))).use { reader ->
-                    var currentSection = ""
-                    var line: String? = reader.readLine()
+                // Читаем весь файл в память целиком. Дальше делаем два прохода по списку
+                // строк — это дешевле, чем открывать поток дважды.
+                val lines = BufferedReader(
+                    InputStreamReader(inputStream, Charset.forName("Windows-1251"))
+                ).use { it.readLines() }
 
-                    while (line != null) {
-                        val trimmed = line.trim()
+                // ПЕРВЫЙ ПРОХОД: секция [vars]. Наполняем словарь шкал.
+                // Важно, что делаем это ДО второго прохода: во втором проходе
+                // шкалы параметров будут резолвиться через этот словарь.
+                parseVarsSection(lines, variables)
 
-                        when {
-                            trimmed.startsWith("[") && trimmed.endsWith("]") -> {
-                                currentSection = trimmed.substring(1, trimmed.length - 1).uppercase()
-                            }
-                            trimmed.isEmpty() || trimmed.startsWith(";") -> {
-                                // пропускаем пустые строки и комментарии
-                            }
-                            trimmed.contains("=") -> {
-                                when (currentSection) {
-                                    "PAGES" -> parsePageLine(trimmed)?.let { pagesRaw.add(it) }
-                                    "DEVICE", "EVENTS", "VARS" -> {
-                                        // не параметры
-                                    }
-                                    else -> {
-                                        if (currentSection.isNotEmpty()) {
-                                            val param = parseParameterLine(trimmed)
-                                            if (param != null) {
-                                                parametersBySection
-                                                    .getOrPut(currentSection) { mutableMapOf() }[param.name] = param
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        line = reader.readLine()
-                    }
-                }
+                // ВТОРОЙ ПРОХОД: секция [PAGES] и секции с параметрами ([RAM], [FLASH], [CD] и т.д.).
+                // Секция [vars] во втором проходе игнорируется (она уже разобрана).
+                parseParametersSections(lines, pagesRaw, parametersBySection)
             }
         } catch (e: Exception) {
             e.printStackTrace()
             return emptyList()
         }
 
+        // Собираем итоговые страницы. Один и тот же словарь variables
+        // передаётся во все PageInfo этого INI-файла.
         return pagesRaw.map { (id, title, refs) ->
             val params = refs.mapNotNull { ref ->
                 parametersBySection[ref.section]?.get(ref.name)
             }
-            PageInfo(id, title, params)
+            PageInfo(id, title, params, variables)
+        }
+    }
+
+    /**
+     * Первый проход: разбирает только секцию [vars].
+     *
+     * В [vars] могут быть строки вида:
+     *   IntegerScale=1
+     *   FracDecScale=0,1              ← запятая как десятичный разделитель
+     *   CINScale=0,0226
+     *   AOUT2K_scale=0.00390625       ← точка тоже допустима
+     *
+     * Правила разбора:
+     *   - ключом считается всё до первого '=' (trim);
+     *   - в значении запятая заменяется на точку — поддержка русской локали;
+     *   - пустые значения, нечисловые значения и пустые ключи МОЛЧА пропускаются
+     *     (по договорённости: не ругаться на «странные» строки в INI-файле).
+     *
+     * Результат складывается в переданный [out]. Метод ничего не возвращает.
+     */
+    private fun parseVarsSection(lines: List<String>, out: MutableMap<String, Double>) {
+        var inVars = false
+        for (raw in lines) {
+            val line = raw.trim()
+            when {
+                line.isEmpty() || line.startsWith(";") -> {
+                    // пустые строки и комментарии игнорируем
+                }
+                line.startsWith("[") && line.endsWith("]") -> {
+                    // смена секции: интересна только [vars]
+                    val section = line.substring(1, line.length - 1).uppercase()
+                    inVars = (section == "VARS")
+                }
+                inVars && line.contains("=") -> {
+                    val parts = line.split("=", limit = 2)
+                    if (parts.size == 2) {
+                        val name = parts[0].trim()
+                        val valueStr = parts[1].trim().replace(',', '.')
+                        if (name.isNotEmpty()) {
+                            val value = valueStr.toDoubleOrNull()
+                            if (value != null) {
+                                out[name] = value
+                            }
+                            // нечисловые значения молча пропускаем
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Второй проход: собирает страницы из [PAGES] и параметры из секций
+     * с параметрами ([RAM], [FLASH], [CD] и любых других, кроме [DEVICE],
+     * [EVENTS], [VARS]).
+     *
+     * Результаты складываются в [pagesRaw] (сырые страницы до разрешения ссылок)
+     * и [parametersBySection] (все параметры, сгруппированные по имени секции).
+     * Разрешение ссылок (RAM:Uref → конкретный ParameterInfo) выполняется
+     * в [parsePages] после второго прохода.
+     */
+    private fun parseParametersSections(
+        lines: List<String>,
+        pagesRaw: MutableList<Triple<String, String, List<PageParameterRef>>>,
+        parametersBySection: MutableMap<String, MutableMap<String, ParameterInfo>>
+    ) {
+        var currentSection = ""
+        for (raw in lines) {
+            val line = raw.trim()
+            when {
+                line.startsWith("[") && line.endsWith("]") -> {
+                    currentSection = line.substring(1, line.length - 1).uppercase()
+                }
+                line.isEmpty() || line.startsWith(";") -> {
+                    // пропускаем пустые строки и комментарии
+                }
+                line.contains("=") -> {
+                    when (currentSection) {
+                        "PAGES" -> parsePageLine(line)?.let { pagesRaw.add(it) }
+                        // Служебные секции не содержат Modbus-параметров.
+                        // [VARS] уже разобрана в первом проходе.
+                        "DEVICE", "EVENTS", "VARS" -> {
+                            // не параметры
+                        }
+                        else -> {
+                            if (currentSection.isNotEmpty()) {
+                                val param = parseParameterLine(line)
+                                if (param != null) {
+                                    parametersBySection
+                                        .getOrPut(currentSection) { mutableMapOf() }[param.name] = param
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

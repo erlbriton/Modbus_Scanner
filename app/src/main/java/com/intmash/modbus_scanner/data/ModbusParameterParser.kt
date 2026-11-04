@@ -11,10 +11,15 @@ package com.intmash.modbus_scanner.data
  *
  * Если параметр в INI описан с ошибкой (неизвестный тип, битый регистр, TByte без .L/.H),
  * парсер возвращает null. Такой параметр просто не попадёт в список отображаемых,
- * и не сломает UI. Ошибки в INI-файле легко увидеть по логам.
+ * и не сломает UI.
  *
- * Все имена полей совпадают с обозначениями в INI-файле, чтобы при чтении кода
- * можно было сразу сопоставить "поле → строка в INI".
+ * Масштаб ([ModbusParameter.scaleFactor]) резолвится в два этапа:
+ *   - если в INI-строке параметра в поле масштаба стоит ЧИСЛО ("0.00390625" или "0,00390625"),
+ *     оно берётся напрямую (запятая заменяется на точку);
+ *   - если там ИМЯ шкалы ("CINScale", "FracDecScale"), значение ищется в словаре [vars],
+ *     который передаётся в [parse] как Map<String, Double>;
+ *   - если поля нет, имя не найдено, значение пустое или битое — молча считаем 1.0
+ *     (без масштабирования).
  */
 object ModbusParameterParser {
 
@@ -22,8 +27,14 @@ object ModbusParameterParser {
      * Главная точка входа. Возвращает [ModbusParameter] или null, если параметр
      * не удалось разобрать (неизвестный тип, некорректный адрес, несовпадение
      * типа и формы адреса).
+     *
+     * @param param Описание параметра из INI-файла.
+     * @param variables Словарь из секции [vars] конкретного INI-файла.
+     *                  Если параметр указывает на имя шкалы, значение берётся оттуда.
+     *                  Если в INI нет [vars] или параметр использует числовое значение,
+     *                  этот аргумент можно передать пустым (пустой Map) — будет 1.0.
      */
-    fun parse(param: ParameterInfo): ModbusParameter? {
+    fun parse(param: ParameterInfo, variables: Map<String, Double>): ModbusParameter? {
         // 1. Разбираем тип. Неизвестный тип — параметр пропускается.
         val type = parseType(param.type) ?: return null
 
@@ -32,17 +43,19 @@ object ModbusParameterParser {
 
         // 3. Проверяем соответствие "тип ↔ форма адреса":
         //    TBit требует Bit, TByte требует ByteField,
-        //    TWord/TDWord/TFloat требуют Register,
+        //    TWord/TInteger/TDWord/TFloat требуют Register,
         //    TPrmList может быть и Register, и ByteField.
         if (!isAddressValidForType(type, address)) return null
 
-        // 4. Определяем масштаб:
-        //    - TBit / TFloat / TPrmList — масштаб не применяется (IntegerScale);
-        //    - для остальных — берём из rawFields[0] или дефолт IntegerScale.
-        val scale = when (type) {
-            ModbusType.TBit, ModbusType.TFloat, ModbusType.TPrmList -> ValueScale.IntegerScale
-            else -> parseScale(param.rawFields.getOrNull(0) ?: "")
-                ?: ValueScale.IntegerScale
+        // 4. Определяем масштаб.
+        //    У TBit/TFloat/TPrmList масштаб не применяется — они всегда физические:
+        //      - TBit: 0/1 без масштаба;
+        //      - TFloat: сам по себе физическое значение (IEEE 754);
+        //      - TPrmList: значение — код из списка, не число.
+        //    У остальных типов масштаб берём из rawFields[0] с резолвингом через variables.
+        val scaleFactor = when (type) {
+            ModbusType.TBit, ModbusType.TFloat, ModbusType.TPrmList -> 1.0
+            else -> resolveScale(param.rawFields.getOrNull(0) ?: "", variables)
         }
 
         // 5. Размер: сколько 16-битных регистров занимает параметр.
@@ -66,7 +79,7 @@ object ModbusParameterParser {
             description = param.description,
             unit = unit,
             type = type,
-            scale = scale,
+            scaleFactor = scaleFactor,
             address = address,
             registerCount = registerCount,
             pRmlist = pRmlist,
@@ -75,13 +88,14 @@ object ModbusParameterParser {
     }
 
     /**
-     * Разбирает строку типа из INI ("TWORD", "TBit", "TFloat" и т.п.)
+     * Разбирает строку типа из INI ("TWORD", "TBit", "TFloat", "TInteger" и т.п.)
      * в enum [ModbusType]. Регистр не важен — приводим к верхнему.
      */
     private fun parseType(raw: String): ModbusType? = when (raw.uppercase()) {
         "TBIT" -> ModbusType.TBit
         "TBYTE" -> ModbusType.TByte
         "TWORD" -> ModbusType.TWord
+        "TINTEGER" -> ModbusType.TInteger
         "TDWORD" -> ModbusType.TDWord
         "TFLOAT" -> ModbusType.TFloat
         "TPRMLIST" -> ModbusType.TPrmList
@@ -89,16 +103,26 @@ object ModbusParameterParser {
     }
 
     /**
-     * Разбирает строку масштаба ("FracDecScale" и т.п.) в enum [ValueScale].
-     * Неизвестный масштаб → null (вызывающая сторона подставит IntegerScale).
+     * Резолвит строку масштаба из INI-строки параметра в числовое значение.
+     *
+     * Логика:
+     *   1. Пусто → 1.0 (без масштаба).
+     *   2. Похоже на число ("0.00390625" или "0,00390625") → это число.
+     *   3. Имя в [variables] ("CINScale", "FracDecScale") → значение из словаря.
+     *   4. Иначе → 1.0 (молча, по договорённости — не ругаемся на неизвестные шкалы).
+     *
+     * Запятая как десятичный разделитель поддерживается: "0,1" → 0.1.
      */
-    private fun parseScale(raw: String): ValueScale? = when (raw) {
-        "IntegerScale" -> ValueScale.IntegerScale
-        "FracDecScale" -> ValueScale.FracDecScale
-        "FracHundScale" -> ValueScale.FracHundScale
-        "FracThousScale" -> ValueScale.FracThousScale
-        "FracDecThousScale" -> ValueScale.FracDecThousScale
-        else -> null
+    private fun resolveScale(raw: String, variables: Map<String, Double>): Double {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return 1.0
+
+        // Сначала пробуем как число (замена запятой на точку).
+        val numeric = trimmed.replace(',', '.').toDoubleOrNull()
+        if (numeric != null) return numeric
+
+        // Затем как имя из [vars].
+        return variables[trimmed] ?: 1.0
     }
 
     /**
@@ -111,7 +135,7 @@ object ModbusParameterParser {
         return when (type) {
             ModbusType.TBit -> address is RegisterAddress.Bit
             ModbusType.TByte -> address is RegisterAddress.ByteField
-            ModbusType.TWord, ModbusType.TDWord, ModbusType.TFloat ->
+            ModbusType.TWord, ModbusType.TInteger, ModbusType.TDWord, ModbusType.TFloat ->
                 address is RegisterAddress.Register
             // TPrmList может быть и байтом, и полным регистром:
             //   p405 = .../TPrmList/xE009/rC004.H/...   ← половина байта (высокий)
@@ -213,6 +237,11 @@ object ModbusParameterParser {
  * Удобное расширение: преобразовать все параметры страницы в [ModbusParameter].
  * Параметры, которые не удалось разобрать, молча пропускаются — чтобы одна ошибка
  * в INI-файле не ломала отображение всей страницы.
+ *
+ * Словарь шкал [PageInfo.variables] (из секции [vars]) передаётся в парсер,
+ * чтобы строковые имена масштабов ("CINScale") резолвились в числовые значения.
  */
 fun PageInfo.toModbusParameters(): List<ModbusParameter> =
-    parameters.mapNotNull(ModbusParameterParser::parse)
+    parameters.mapNotNull { param ->
+        ModbusParameterParser.parse(param, this.variables)
+    }

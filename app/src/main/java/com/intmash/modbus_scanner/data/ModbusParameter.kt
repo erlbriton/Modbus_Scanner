@@ -9,7 +9,7 @@ package com.intmash.modbus_scanner.data
  * Зачем отдельный класс, а не сразу [ParameterInfo]:
  *  1) [ParameterInfo] — это "сырое" описание из INI, где всё строки.
  *     ModbusParameter — это уже типизированная структура:
- *     registerNumber: Int, bitNumber: Int?, scale как enum.
+ *     registerNumber: Int, bitNumber: Int?, scaleFactor: Double.
  *  2) Многие поля из INI (маска бита, размер, значения по умолчанию)
  *     нам не нужны для Modbus — мы их не тащим.
  *  3) Парсинг INI и подготовка к Modbus — разные задачи, разные файлы.
@@ -24,9 +24,19 @@ package com.intmash.modbus_scanner.data
  * @property description   Описание из INI ("Напряжение задания"). Может быть пустым.
  * @property unit          Единица измерения ("V", "A"). Пустая строка, если единицы нет.
  *                         В INI маркер "нет единицы" — это "*", преобразуем в "".
- * @property type          Тип данных (TBit / TByte / TWord / TDWord / TFloat / TPrmList).
- * @property scale         Масштаб. Значение, прочитанное из регистра, делится на scale.divisor
- *                         (или умножается на divisor при записи — обратное преобразование).
+ * @property type          Тип данных (TBit / TByte / TWord / TInteger / TDWord / TFloat / TPrmList).
+ * @property scaleFactor   Множитель для перевода сырого значения в физическое.
+ *                         При ЧТЕНИИ:   human = raw × scaleFactor.
+ *                         При ЗАПИСИ:   raw   = round(human / scaleFactor).
+ *                         Значение берётся из поля масштаба параметра в INI:
+ *                         либо число ("0.00390625"), либо имя из секции [vars]
+ *                         ("CINScale", "FracDecScale" и т.д.). Если поля нет,
+ *                         имя не найдено или оно пустое — считаем 1.0 (без масштаба).
+ *                         Примеры:
+ *                           scaleFactor = 0.1        → 2200 → 220.0
+ *                           scaleFactor = 0.01       → 21980 → 219.8
+ *                           scaleFactor = 0.00390625 → 256 → 1.0
+ *                           scaleFactor = 1.0        → 100 → 100 (масштаб не применяется)
  * @property address       Адрес (регистр, бит или половина байта). См. [RegisterAddress].
  * @property registerCount Сколько 16-битных регистров занимает параметр (1 или 2).
  * @property pRmlist       Для TPrmList — словарь "число из регистра → отображаемая строка".
@@ -41,7 +51,7 @@ data class ModbusParameter(
     val description: String,
     val unit: String,
     val type: ModbusType,
-    val scale: ValueScale,
+    val scaleFactor: Double,
     val address: RegisterAddress,
     val registerCount: Int,
     val pRmlist: Map<Int, String>?,
@@ -100,7 +110,7 @@ enum class BytePart {
 
 /**
  * Тип данных параметра. Значения совпадают с обозначениями в INI-файле
- * (TBIT, TBYTE, TWORD, TDWORD, TFLOAT, TPRMLIST), но с "человеческим" регистром.
+ * (TBIT, TBYTE, TWORD, TINTEGER, TDWORD, TFLOAT, TPRMLIST), но с "человеческим" регистром.
  */
 enum class ModbusType {
     /** Один бит. Отображается квадратиком, записывается через Read-Modify-Write. */
@@ -109,8 +119,15 @@ enum class ModbusType {
     /** Один байт (младший или старший в регистре). Read-Modify-Write. */
     TByte,
 
-    /** Один 16-битный регистр без знака. Обычно целое значение с масштабом. */
+    /** Один 16-битный регистр БЕЗ знака. Обычно целое значение с масштабом. */
     TWord,
+
+    /**
+     * Один 16-битный регистр СО ЗНАКОМ (диапазон -32768..32767).
+     * При чтении интерпретируется как signed Int16, при записи — обратное преобразование.
+     * См. ValueDecoder / ValueEncoder.
+     */
+    TInteger,
 
     /** Два 16-битных регистра (32 бита), без знака. */
     TDWord,
@@ -120,34 +137,4 @@ enum class ModbusType {
 
     /** Значение из списка (например, скорость 9600/19200). Список — в [ModbusParameter.pRmlist]. */
     TPrmList
-}
-
-/**
- * Масштаб значения.
- *
- * Контроллер передаёт значения как целые числа, а пользователю показывают "человеческое"
- * значение с масштабом. Например, напряжение Uref = 220.0 В хранится как целое 2200,
- * потому что масштаб = 0.1 (FracDecScale).
- *
- * При ЧТЕНИИ:   физическое = сырое / divisor
- * При ЗАПИСИ:   сырое      = физическое * divisor  (и округлить до Int)
- *
- * Значение divisor — константа, привязана к enum. Меняется только если появится
- * новый масштаб в INI — тогда добавляем строку в enum и в парсер.
- */
-enum class ValueScale(val divisor: Double) {
-    /** Масштаб отсутствует. 1 → 1. */
-    IntegerScale(1.0),
-
-    /** Разделить на 10. 2200 → 220.0. */
-    FracDecScale(10.0),
-
-    /** Разделить на 100. 21980 → 219.80. */
-    FracHundScale(100.0),
-
-    /** Разделить на 1000. 1523000 → 1523.0. */
-    FracThousScale(1000.0),
-
-    /** Разделить на 10000. 0 → 0.0. */
-    FracDecThousScale(10000.0)
 }

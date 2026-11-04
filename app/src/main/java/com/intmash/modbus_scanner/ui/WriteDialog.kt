@@ -71,6 +71,7 @@ fun WriteDialog(
 ) {
     when (param.type) {
         ModbusType.TWord,
+        ModbusType.TInteger,
         ModbusType.TByte,
         ModbusType.TDWord,
         ModbusType.TFloat -> WriteNumberDialog(
