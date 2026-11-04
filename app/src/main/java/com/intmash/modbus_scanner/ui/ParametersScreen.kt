@@ -5,6 +5,7 @@ package com.intmash.modbus_scanner.ui
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -49,7 +50,6 @@ import com.intmash.modbus_scanner.data.ModbusParameter
 import com.intmash.modbus_scanner.data.ModbusParameterParser
 import com.intmash.modbus_scanner.data.PageInfo
 import kotlinx.coroutines.launch
-import androidx.compose.foundation.clickable
 
 /**
  * ParametersScreen — экран параметров выбранной страницы INI-файла.
@@ -214,15 +214,16 @@ fun ParametersScreen(
                                 .fillMaxWidth()
                                 .combinedClickable(
                                     onClick = {
-                                      //  Log.e("TAP_TEST", "onClick: ${param.key} ${param.name}")
+                                        //  Log.e("TAP_TEST", "onClick: ${param.key} ${param.name}")
                                         selectedKey = if (isSelected) null else param.key
                                     },
                                     onLongClick = {
                                         // Разбираем ParameterInfo → ModbusParameter.
                                         // null (некорректное описание в INI) — диалог
                                         // не открываем.
-                                     //   Log.e("TAP_TEST", "onLongClick: ${param.key} ${param.name}")
-                                        writeParam = ModbusParameterParser.parse(param, page.variables)
+                                        //   Log.e("TAP_TEST", "onLongClick: ${param.key} ${param.name}")
+                                        writeParam =
+                                            ModbusParameterParser.parse(param, page.variables)
                                     }
                                 ),
                             colors = CardDefaults.cardColors(
