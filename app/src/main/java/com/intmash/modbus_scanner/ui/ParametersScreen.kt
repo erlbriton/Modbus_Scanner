@@ -49,6 +49,7 @@ import com.intmash.modbus_scanner.data.ModbusParameter
 import com.intmash.modbus_scanner.data.ModbusParameterParser
 import com.intmash.modbus_scanner.data.PageInfo
 import kotlinx.coroutines.launch
+import androidx.compose.foundation.clickable
 
 /**
  * ParametersScreen — экран параметров выбранной страницы INI-файла.
@@ -226,9 +227,9 @@ fun ParametersScreen(
                                 ),
                             colors = CardDefaults.cardColors(
                                 containerColor = if (isSelected) {
-                                    MaterialTheme.colorScheme.primaryContainer
+                                    Color(0xFFFF9800)   // светло-оранжевый (выбранная)
                                 } else {
-                                    MaterialTheme.colorScheme.surfaceVariant
+                                    Color(0xFF275ED5)   // очень светлый серый (обычная)
                                 }
                             )
                         ) {
@@ -243,7 +244,7 @@ fun ParametersScreen(
                                 Text(
                                     text = param.name,
                                     fontWeight = FontWeight.Bold,
-                                    fontSize = 14.sp,
+                                    fontSize = 18.sp,
                                     modifier = Modifier.weight(2f)
                                 )
 
@@ -263,26 +264,72 @@ fun ParametersScreen(
                                     contentAlignment = Alignment.CenterEnd
                                 ) {
                                     if (isTBitParam) {
+                                        // Разбираем параметр в Modbus-форму один раз
+                                        // (нужен для записи). remember, чтобы не парсить
+                                        // заново при каждой перерисовке списка.
+                                        // Может быть null, если описание в INI с ошибкой —
+                                        // тогда тап по квадратику ничего не делает.
+                                        val modbusParam = remember(param.key, page.variables) {
+                                            ModbusParameterParser.parse(param, page.variables)
+                                        }
+
+                                        // --- Визуальные настройки квадратика TBit. ---
+                                        // Собраны в одном месте, чтобы легко подстроить
+                                        // под дизайн. Меняются независимо друг от друга:
+                                        //  - bitSize: визуальный размер (26.dp — удобно тапать);
+                                        //  - bitBorderColor: цвет рамки (зелёный при 1, серый при 0);
+                                        //  - bitFillColor: цвет заливки (зелёный при 1, пусто при 0).
+                                        // Пример: если нужен акцентный цвет темы вместо зелёного,
+                                        // замените Color(0xFF2E7D32) на MaterialTheme.colorScheme.primary.
+                                        val bitSize = 30.dp
+                                        val bitBorderColor = if (bitRaw) {
+                                            Color(0xFF19F21D)   // тёмно-зелёный
+                                        } else {
+                                            Color(0xFF9E9E9E)   // серый
+                                        }
+                                        val bitFillColor = if (bitRaw) {
+                                            Color(0xFF2E7D32)
+                                        } else {
+                                            Color.Transparent
+                                        }
+
                                         Box(
                                             modifier = Modifier
-                                                .size(18.dp)
+                                                .size(bitSize)
                                                 .border(
                                                     width = 2.dp,
-                                                    color = MaterialTheme.colorScheme.onSurface
+                                                    color = bitBorderColor
                                                 )
-                                                .background(
-                                                    color = if (bitRaw) {
-                                                        MaterialTheme.colorScheme.onSurface
-                                                    } else {
-                                                        Color.Transparent
+                                                .background(color = bitFillColor)
+                                                .clickable(enabled = modbusParam != null) {
+                                                    val mp = modbusParam ?: return@clickable
+                                                    // Тап по квадратику — запись противоположного значения
+                                                    // БЕЗ открытия диалога. Это удобнее, чем каждый раз
+                                                    // открывать WriteDialog с двумя кнопками.
+                                                    //
+                                                    // По договорённости: «ждём успеха», без оптимистичного
+                                                    // переключения. Значение в UI обновится после
+                                                    // успешной записи (ближайший опрос подхватит его).
+                                                    //
+                                                    // Если запись провалилась — открываем WriteDialog
+                                                    // с текстом ошибки, чтобы пользователь увидел причину
+                                                    // и мог повторить через стандартный диалог.
+                                                    parametersViewModel.writeParameter(
+                                                        param = mp,
+                                                        humanValue = if (bitRaw) 0.0 else 1.0
+                                                    ) { error ->
+                                                        if (error != null) {
+                                                            writeParam = mp
+                                                            writeError = error
+                                                        }
                                                     }
-                                                )
+                                                }
                                         )
                                     } else {
                                         Text(
                                             text = valueText,
                                             fontWeight = FontWeight.Bold,
-                                            fontSize = 14.sp,
+                                            fontSize = 18.sp,
                                             textAlign = TextAlign.End
                                         )
                                     }
