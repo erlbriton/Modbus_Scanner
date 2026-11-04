@@ -47,21 +47,51 @@ class MainViewModel : ViewModel() {
     private var pollingJob: Job? = null
     private var isInitializing = false
 
-    fun initializeAndConnect(usbManager: UsbManager, device: UsbDevice) {
+    /**
+     * Текущий адрес slave в сети Modbus. Обновляется при каждом
+     * initializeAndConnect(...) из настроек (ConnectionSettings.getSlaveAddress).
+     * Используется в startPolling при чтении ID через readDeviceId.
+     */
+    private var currentSlaveAddress: Int = 1
+
+    /**
+     * Инициализирует и открывает USB-порт, запускает опрос для чтения ID.
+     *
+     * @param baudRate Скорость UART. Берётся из настроек соединения
+     *                 (ConnectionSettings.getBaudRate) — пользователь может
+     *                 изменить через диалог "Настройки". Без этого параметра
+     *                 порт всегда открывался бы на захардкоженных 115200.
+     */
+    /**
+     * Инициализирует и открывает USB-порт, запускает опрос для чтения ID.
+     *
+     * @param baudRate Скорость UART (из настроек).
+     * @param slaveAddress Адрес slave в сети Modbus (из настроек, 1..247).
+     *                     Используется во всех дальнейших Modbus-запросах
+     *                     (в т.ч. readDeviceId).
+     */
+    fun initializeAndConnect(
+        usbManager: UsbManager,
+        device: UsbDevice,
+        baudRate: Int,
+        slaveAddress: Int
+    ) {
         if (isInitializing) {
             Log.e("MainViewModel", "initializeAndConnect: уже идёт инициализация, пропускаю")
             return
         }
         isInitializing = true
+        // Запоминаем адрес для всех последующих Modbus-запросов в этой сессии.
+        currentSlaveAddress = slaveAddress
 
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                Log.e("MainViewModel", "initializeAndConnect: устройство $device")
+                Log.e("MainViewModel", "initializeAndConnect: устройство $device, baudRate=$baudRate, slave=$slaveAddress")
                 withContext(Dispatchers.Main) { deviceId = "Инициализация порта..." }
 
                 delay(500)
 
-                val success = repository.openPort(usbManager, device)
+                val success = repository.openPort(usbManager, device, baudRate)
                 Log.e("MainViewModel", "initializeAndConnect: openPort вернул $success")
 
                 withContext(Dispatchers.Main) {
@@ -128,8 +158,8 @@ class MainViewModel : ViewModel() {
                 }
                 reopenNext = false
 
-                Log.e("MainViewModel", "попытка $attempt: вызываю readDeviceId()")
-                val result = repository.readDeviceId()
+                Log.e("MainViewModel", "попытка $attempt: вызываю readDeviceId(slave=$currentSlaveAddress)")
+                val result = repository.readDeviceId(currentSlaveAddress)
                 Log.e("MainViewModel", "попытка $attempt: readDeviceId вернул '$result'")
 
                 if (result != null) {

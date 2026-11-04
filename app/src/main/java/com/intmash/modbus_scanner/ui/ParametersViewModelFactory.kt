@@ -26,7 +26,8 @@ import com.intmash.modbus_scanner.data.PageInfo
  */
 class ParametersViewModelFactory(
     private val repository: ModbusRepository,
-    private val page: PageInfo
+    private val page: PageInfo,
+    private val slaveAddress: Int
 ) : ViewModelProvider.Factory {
 
     @Suppress("UNCHECKED_CAST")
@@ -36,6 +37,6 @@ class ParametersViewModelFactory(
                 "ParametersViewModelFactory: неподдерживаемый класс ViewModel: ${modelClass.name}"
             )
         }
-        return ParametersViewModel(repository, page) as T
+        return ParametersViewModel(repository, page, slaveAddress) as T
     }
 }

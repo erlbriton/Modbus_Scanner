@@ -48,7 +48,14 @@ import kotlinx.coroutines.withContext
  */
 class ParametersViewModel(
     private val repository: ModbusRepository,
-    val page: PageInfo
+    val page: PageInfo,
+    /**
+     * Адрес slave в сети Modbus (1..247). Передаётся из настроек соединения
+     * через [ParametersViewModelFactory] → [AppNavHost]. Используется во всех
+     * Modbus-запросах опроса и записи.
+     * Раньше был константой SLAVE_ADDRESS = 1 в companion object.
+     */
+    private val slaveAddress: Int
 ) : ViewModel() {
 
     // =========================================================================
@@ -203,7 +210,7 @@ class ParametersViewModel(
      */
     private fun executeWriteDirect(param: ModbusParameter, plan: EncodePlan.WriteDirect): String? {
         val success = repository.writeHoldingRegisters(
-            slaveAddr = SLAVE_ADDRESS,
+            slaveAddr = slaveAddress,
             startRegister = plan.startRegister,
             values = plan.values
         )
@@ -230,7 +237,7 @@ class ParametersViewModel(
     private fun executeWriteBit(param: ModbusParameter, plan: EncodePlan.WriteBit): String? {
         // 1. Читаем текущее значение регистра.
         val registers = repository.readHoldingRegisters(
-            slaveAddr = SLAVE_ADDRESS,
+            slaveAddr = slaveAddress,
             startRegister = plan.register,
             count = 1
         ) ?: return "Ошибка записи ${param.name}: контроллер не отвечает на чтение"
@@ -246,7 +253,7 @@ class ParametersViewModel(
 
         // 3. Пишем весь регистр обратно.
         val success = repository.writeHoldingRegisters(
-            slaveAddr = SLAVE_ADDRESS,
+            slaveAddr = slaveAddress,
             startRegister = plan.register,
             values = intArrayOf(newValue)
         )
@@ -271,7 +278,7 @@ class ParametersViewModel(
      */
     private fun executeWriteByte(param: ModbusParameter, plan: EncodePlan.WriteByte): String? {
         val registers = repository.readHoldingRegisters(
-            slaveAddr = SLAVE_ADDRESS,
+            slaveAddr = slaveAddress,
             startRegister = plan.register,
             count = 1
         ) ?: return "Ошибка записи ${param.name}: контроллер не отвечает на чтение"
@@ -283,7 +290,7 @@ class ParametersViewModel(
         }
 
         val success = repository.writeHoldingRegisters(
-            slaveAddr = SLAVE_ADDRESS,
+            slaveAddr = slaveAddress,
             startRegister = plan.register,
             values = intArrayOf(newValue)
         )
@@ -318,7 +325,7 @@ class ParametersViewModel(
 
         for (request in groupedRequests) {
             val registers = repository.readHoldingRegisters(
-                slaveAddr = SLAVE_ADDRESS,
+                slaveAddr = slaveAddress,
                 startRegister = request.startRegister,
                 count = request.count
             )
@@ -376,9 +383,6 @@ class ParametersViewModel(
     }
 
     companion object {
-        /** Адрес slave контроллера. По договорённости пока всегда 1. */
-        private const val SLAVE_ADDRESS = 1
-
         /** Сколько провалов подряд до перехода в NoConnection. */
         private const val FAILURES_BEFORE_NO_CONNECTION = 3
     }

@@ -38,6 +38,14 @@ fun AppNavHost(
     viewModel: MainViewModel,
     isVirtualDevice: Boolean,
     activityContext: android.content.Context,
+    // Колбэк «настройки сохранены».
+    onSettingsSaved: () -> Unit = {},
+    // Адрес slave в сети Modbus, актуальный на момент композиции.
+    // Приходит из MainActivity, читается из ConnectionSettings.
+    // Используется как часть key для ParametersViewModel — при смене
+    // адреса старая VM уничтожается (останавливает опрос на старом адресе),
+    // создаётся новая с новым адресом.
+    slaveAddress: Int = 1,
     modifier: Modifier = Modifier,
     navController: NavHostController = rememberNavController()
 ) {
@@ -80,7 +88,12 @@ fun AppNavHost(
                         navController.navigate(FileBrowserRoute)
                     }
                 },
-                errorMessage = errorMessage
+                errorMessage = errorMessage,
+                // Пробрасываем колбэк из MainActivity в MainScreen.
+                // Когда пользователь сохранит настройки в диалоге,
+                // MainScreen вызовет его — а тот уже переподключит порт
+                // с новой скоростью.
+                onSettingsSaved = onSettingsSaved
             )
         }
 
@@ -120,11 +133,17 @@ fun AppNavHost(
                 // Создаём ViewModel параметров через фабрику, привязанную к этому
                 // back stack entry. key = pageId гарантирует, что при переходах
                 // между страницами у каждой будет свой экземпляр VM (и свой опрос).
+                // key включает slaveAddress: при смене адреса в настройках
+                // Compose уничтожает старый экземпляр VM (его onCleared
+                // останавливает polling) и создаёт новый — с новым адресом.
+                // Без этого старый опрос продолжал бы слать запросы на старый
+                // адрес параллельно с MainViewModel — конфликт обмена.
                 val parametersViewModel: ParametersViewModel = viewModel(
-                    key = "parameters_${route.pageId}",
+                    key = "parameters_${route.pageId}_$slaveAddress",
                     factory = ParametersViewModelFactory(
                         repository = viewModel.repository,
-                        page = page
+                        page = page,
+                        slaveAddress = slaveAddress
                     )
                 )
                 // Запускаем опрос при входе на экран. Останавливается автоматически,

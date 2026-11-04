@@ -44,6 +44,10 @@ fun MainScreen(
     isVirtualDevice: Boolean,
     onSelectFileClick: () -> Unit,
     errorMessage: String?,
+    // Колбэк «настройки сохранены» — чтобы MainActivity переподключилась
+    // к контроллеру с новой скоростью без перезапуска приложения.
+    // Дефолт {} — чтобы не сломать существующие вызовы.
+    onSettingsSaved: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     // --- Контекст и хранилище настроек ---
@@ -188,16 +192,15 @@ fun MainScreen(
                 connectionSettings.setSlaveAddress(newAddress)
                 // Закрываем диалог.
                 showSettingsDialog = false
-                // Показываем Toast для обратной связи: пользователь видит,
-                // что настройки применились. Автоматическое переподключение
-                // с новыми параметрами будет отдельным шагом — пока изменения
-                // вступят в силу при следующем физическом переподключении
-                // контроллера или перезапуске приложения.
+                // Показываем Toast для обратной связи.
                 Toast.makeText(
                     context,
                     "Сохранено: $newBaudRate бод, адрес $newAddress",
                     Toast.LENGTH_SHORT
                 ).show()
+                // Сообщаем наверх, что настройки изменились.
+                // MainActivity переподключится с новой скоростью.
+                onSettingsSaved()
             },
             onDismiss = { showSettingsDialog = false }
         )

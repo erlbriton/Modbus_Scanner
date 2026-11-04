@@ -19,6 +19,14 @@ class ModbusRepository {
     private var currentDevice: UsbDevice? = null
 
     /**
+     * Скорость, с которой последний раз успешно открывался порт.
+     * Нужна для reopen(): когда порт "завис" и MainViewModel пытается
+     * переоткрыть его, нужно использовать ту же скорость, что и раньше.
+     * Дефолт 115200 — значение по умолчанию и для ConnectionSettings.
+     */
+    private var lastBaudRate: Int = ConnectionSettings.DEFAULT_BAUD_RATE
+
+    /**
      * Возвращает deviceName текущего открытого устройства или null.
      * Используется для проверки, что detach пришёл именно для нашего устройства.
      * deviceName — стабильное имя физического порта (например, "/dev/bus/usb/001/002"),
@@ -26,13 +34,28 @@ class ModbusRepository {
      */
     fun getCurrentDeviceName(): String? = currentDevice?.deviceName
 
-    fun openPort(usbManager: UsbManager, device: UsbDevice): Boolean {
-        Log.e("ModbusRepository", "openPort(): старт, device=$device")
+    /**
+     * Открывает USB-порт для связи с контроллером.
+     *
+     * @param usbManager Системный сервис USB Android.
+     * @param device Физическое USB-устройство.
+     * @param baudRate Скорость UART (baud rate). Берётся из настроек соединения
+     *                 ([ConnectionSettings.getBaudRate]) — пользователь может
+     *                 выбрать одну из 6 стандартных скоростей.
+     * @return true, если порт открыт и настроен.
+     */
+    fun openPort(usbManager: UsbManager, device: UsbDevice, baudRate: Int): Boolean {
+        Log.e("ModbusRepository", "openPort(): старт, device=$device, baudRate=$baudRate")
 
         close()
 
         currentManager = usbManager
         currentDevice = device
+        // Запоминаем скорость для reopen(). Если открытие провалится ниже,
+        // lastBaudRate всё равно сохранится — при следующем reopen() будет
+        // та же скорость. Если пользователь сменил её в настройках и вызвал
+        // openPort с новой — она перезапишет старое значение.
+        lastBaudRate = baudRate
 
         val availableDrivers = UsbSerialProber.getDefaultProber().findAllDrivers(usbManager)
         Log.e("ModbusRepository", "openPort(): найдено драйверов — ${availableDrivers.size}")
@@ -64,12 +87,14 @@ class ModbusRepository {
                 Thread.sleep(100)
                 dtr = true
                 rts = true
-                setParameters(115200, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
+                // Скорость теперь приходит параметром — раньше было жёстко 115200.
+                // Формат кадра неизменен: 8 бит данных, 1 стоп-бит, без чётности (8N1).
+                setParameters(baudRate, 8, UsbSerialPort.STOPBITS_1, UsbSerialPort.PARITY_NONE)
             }
 
             Thread.sleep(500)
 
-            Log.e("ModbusRepository", "USB-порт успешно открыт на 115200 8N1")
+            Log.e("ModbusRepository", "USB-порт успешно открыт на $baudRate 8N1")
             return true
 
         } catch (e: Exception) {
@@ -91,22 +116,33 @@ class ModbusRepository {
     fun reopen(): Boolean {
         val mgr = currentManager
         val dev = currentDevice
-        Log.e("ModbusRepository", "reopen(): mgr=${mgr != null}, dev=${dev != null}")
+        Log.e("ModbusRepository", "reopen(): mgr=${mgr != null}, dev=${dev != null}, baudRate=$lastBaudRate")
         if (mgr == null || dev == null) return false
-        val ok = openPort(mgr, dev)
+        // Используем ту же скорость, с которой порт открывался в прошлый раз.
+        // lastBaudRate обновляется в openPort при каждом успешном вызове.
+        val ok = openPort(mgr, dev, lastBaudRate)
         Log.e("ModbusRepository", "reopen(): openPort вернул $ok")
         return ok
     }
 
-    fun readDeviceId(): String? {
+    /**
+     * Отправляет запрос 0x11 (Report Server ID) для чтения идентификатора устройства.
+     *
+     * @param slaveAddr Адрес slave в сети Modbus (1..247). Берётся из настроек
+     *                  соединения (ConnectionSettings.getSlaveAddress) — пользователь
+     *                  может изменить через диалог "Настройки".
+     * @return Строка идентификатора, либо null при ошибке.
+     */
+    fun readDeviceId(slaveAddr: Int): String? {
         val port = usbPort ?: run {
             Log.e("ModbusRepository", "readDeviceId(): usbPort == null")
             return null
         }
 
-        Log.e("ModbusRepository", "readDeviceId(): isOpen=${port.isOpen}, dtr=${port.dtr}, rts=${port.rts}")
+        Log.e("ModbusRepository", "readDeviceId(): slave=$slaveAddr, isOpen=${port.isOpen}, dtr=${port.dtr}, rts=${port.rts}")
 
-        val request = byteArrayOf(0x01.toByte(), 0x11.toByte())
+        // Адрес slave теперь приходит параметром — раньше был жёстко 0x01.
+        val request = byteArrayOf((slaveAddr and 0xFF).toByte(), 0x11.toByte())
         val crc = calculateCRC16(request)
         val fullRequest = request + crc
 
@@ -143,7 +179,7 @@ class ModbusRepository {
                             val funcCode = currentBytes[1].toInt() and 0xFF
                             Log.e("ModbusRepository", "пакет: slaveId=0x%02X, funcCode=0x%02X, dataLength=$dataLength".format(slaveId, funcCode))
 
-                            if (slaveId == 0x01 && funcCode == 0x11) {
+                            if (slaveId == (slaveAddr and 0xFF) && funcCode == 0x11) {
                                 val payloadEnd = minOf(3 + dataLength, currentBytes.size - 2)
                                 var idText = ""
                                 for (i in 3 until payloadEnd) {

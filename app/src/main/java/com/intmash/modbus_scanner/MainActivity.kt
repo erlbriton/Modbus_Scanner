@@ -8,12 +8,17 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Scaffold
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.ViewModelProvider
 import com.intmash.modbus_scanner.navigation.AppNavHost
 import com.intmash.modbus_scanner.ui.MainViewModel
 import com.intmash.modbus_scanner.ui.theme.ModbusIDTheme
 import com.intmash.modbus_scanner.usb.UsbConnectionManager
+import com.intmash.modbus_scanner.data.ConnectionSettings
+
 
 class MainActivity : ComponentActivity() {
 
@@ -31,11 +36,27 @@ class MainActivity : ComponentActivity() {
 
         // Создаём менеджер USB. Всё, что было в usbReceiver и attachReceiver,
         // теперь внутри UsbConnectionManager.
+        // Читаем настройки один раз при старте.
+        // Если пользователь меняет скорость — применится при следующем
+        // переподключении контроллера (или перезапуске приложения).
+        // Автоматическое переподключение после сохранения — следующий подшаг.
+        val connectionSettings = ConnectionSettings(this)
+
+        // State с текущим адресом slave. Нужен, чтобы AppNavHost перерисовался
+        // при смене адреса — тогда ParametersViewModel создастся заново
+        // со свежим адресом (через key). Изначально читается из SharedPreferences.
+        var slaveAddressState by mutableStateOf(connectionSettings.getSlaveAddress())
+
         usbConnection = UsbConnectionManager(
             activity = this,
             usbManager = usbManager,
             onDeviceReady = { device ->
-                viewModel.initializeAndConnect(usbManager, device)
+                viewModel.initializeAndConnect(
+                    usbManager = usbManager,
+                    device = device,
+                    baudRate = connectionSettings.getBaudRate(),
+                    slaveAddress = connectionSettings.getSlaveAddress()
+                )
             },
             onDeviceDetached = { device ->
                 if (viewModel.isOurDevice(device)) {
@@ -46,13 +67,51 @@ class MainActivity : ComponentActivity() {
         usbConnection.register()
         usbConnection.checkDevices()
 
+        // Лямбда «настройки сохранены»: переподключаемся к контроллеру
+        // с новой скоростью из SharedPreferences.
+        //
+        // Логика:
+        //  1. Находим текущее устройство (то, с которым работали).
+        //  2. Если устройство не найдено (например, кабель выдернут) — ничего
+        //     не делаем: reconnect бессмысленен, при следующем подключении
+        //     новая скорость применится автоматически (см. onDeviceReady).
+        //  3. Иначе — останавливаем опрос через viewModel.shutdown() (он же
+        //     закрывает порт), затем заново вызываем initializeAndConnect
+        //     с новой скоростью.
+        val reconnectWithCurrentSettings = {
+            // Обновляем State адреса. Это триггерит рекомпозицию AppNavHost,
+            // и ParametersViewModel (если открыт) пересоздастся через key.
+            // Старый экземпляр вызовет onCleared → остановит свой polling.
+            slaveAddressState = connectionSettings.getSlaveAddress()
+
+            val currentDevice = usbManager.deviceList.values.firstOrNull {
+                viewModel.isOurDevice(it)
+            }
+            if (currentDevice != null) {
+                viewModel.shutdown()   // Останавливает опрос, закрывает порт
+                viewModel.initializeAndConnect(
+                    usbManager = usbManager,
+                    device = currentDevice,
+                    baudRate = connectionSettings.getBaudRate(),
+                    slaveAddress = connectionSettings.getSlaveAddress()
+                )
+            }
+        }
+
         setContent {
             ModbusIDTheme {
+                // Чтение State внутри setContent — Compose «подписывается»
+                // на изменения slaveAddressState. При его изменении
+                // весь блок перерисуется, и AppNavHost получит новый адрес.
+                val currentSlaveAddress = slaveAddressState
+
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     AppNavHost(
                         viewModel = viewModel,
                         isVirtualDevice = IS_VIRTUAL_DEVICE,
                         activityContext = this,
+                        onSettingsSaved = reconnectWithCurrentSettings,
+                        slaveAddress = currentSlaveAddress,
                         modifier = Modifier.padding(innerPadding)
                     )
                 }
