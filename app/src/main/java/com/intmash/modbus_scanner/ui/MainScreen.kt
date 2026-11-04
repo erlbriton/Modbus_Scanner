@@ -46,8 +46,18 @@ fun MainScreen(
     errorMessage: String?,
     // Колбэк «настройки сохранены» — чтобы MainActivity переподключилась
     // к контроллеру с новой скоростью без перезапуска приложения.
-    // Дефолт {} — чтобы не сломать существующие вызовы.
     onSettingsSaved: () -> Unit = {},
+
+    // --- Поиск устройств в сети Modbus ---
+    // Все параметры делегируются в MainViewModel через AppNavHost.
+    // Дефолты — чтобы не ломать существующие вызовы.
+    searchState: SearchState = SearchState.Idle,
+    foundDevices: List<FoundDevice> = emptyList(),
+    currentSearchAddress: Int? = null,
+    onStartSearch: (timeoutMs: Int) -> Unit = {},
+    onStopSearch: () -> Unit = {},
+    onApplyAddress: (FoundDevice) -> Unit = {},
+
     modifier: Modifier = Modifier
 ) {
     // --- Контекст и хранилище настроек ---
@@ -60,6 +70,11 @@ fun MainScreen(
     // Флаг «диалог настроек открыт». rememberSaveable — переживает
     // поворот экрана (диалог останется открытым при повороте).
     var showSettingsDialog by rememberSaveable { mutableStateOf(false) }
+
+    // Флаг «диалог поиска устройств открыт». Аналогично — переживает поворот.
+    // Состояние самого поиска (searchState, foundDevices и т.д.) живёт
+    // в MainViewModel — оно переживает даже смену экрана.
+    var showSearchDialog by rememberSaveable { mutableStateOf(false) }
 
     // Box — контейнер, центрирующий всё содержимое по центру экрана.
     Box(
@@ -163,9 +178,9 @@ fun MainScreen(
                     )
                 }
 
-                // Кнопка "Поиск"
+                // Кнопка "Поиск" — открывает диалог поиска устройств.
                 IconButton(
-                    onClick = { /* TODO: работа поиска */ },
+                    onClick = { showSearchDialog = true },
                     modifier = Modifier.size(iconTouchSize)
                 ) {
                     Icon(
@@ -177,6 +192,25 @@ fun MainScreen(
                 }
             }
         }
+    }
+
+    // --- Диалог поиска устройств ---
+    // Открывается по кнопке-лупе. Все действия и состояние — снаружи,
+    // отсюда только передаём колбэк закрытия.
+    if (showSearchDialog) {
+        DeviceSearchDialog(
+            searchState = searchState,
+            foundDevices = foundDevices,
+            currentSearchAddress = currentSearchAddress,
+            // Скорость читаем из ConnectionSettings на момент открытия
+            // диалога — она актуальна, потому что при изменении через
+            // настройки сам диалог был бы закрыт (кнопки разные).
+            currentBaudRate = connectionSettings.getBaudRate(),
+            onStartSearch = onStartSearch,
+            onStopSearch = onStopSearch,
+            onApplyAddress = onApplyAddress,
+            onDismiss = { showSearchDialog = false }
+        )
     }
 
     // --- Диалог настроек ---

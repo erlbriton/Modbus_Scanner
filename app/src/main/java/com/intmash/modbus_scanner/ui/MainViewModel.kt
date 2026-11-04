@@ -47,6 +47,35 @@ class MainViewModel : ViewModel() {
     private var pollingJob: Job? = null
     private var isInitializing = false
 
+    // --- Состояние поиска устройств в сети Modbus ---
+
+    /**
+     * Состояние поиска устройств:
+     *  - [SearchState.Idle]      — поиск не запущен;
+     *  - [SearchState.Running]   — идёт перебор адресов;
+     *  - [SearchState.Completed] — поиск завершён (все адреса проверены
+     *                              или пользователь остановил вручную).
+     */
+    var searchState by mutableStateOf(SearchState.Idle)
+        private set
+
+    /**
+     * Найденные устройства за текущий (или последний завершённый) поиск.
+     * Список очищается при старте нового поиска.
+     */
+    var foundDevices by mutableStateOf<List<FoundDevice>>(emptyList())
+        private set
+
+    /**
+     * Адрес, который сейчас проверяется. null — поиск не идёт.
+     * UI показывает "Проверяю адрес X..." во время Running.
+     */
+    var currentSearchAddress by mutableStateOf<Int?>(null)
+        private set
+
+    /** Активная корутина поиска. null, если поиск не идёт. */
+    private var searchJob: Job? = null
+
     /**
      * Текущий адрес slave в сети Modbus. Обновляется при каждом
      * initializeAndConnect(...) из настроек (ConnectionSettings.getSlaveAddress).
@@ -187,11 +216,183 @@ class MainViewModel : ViewModel() {
         repository.close()
     }
 
+    /**
+     * Запускает поиск устройств в сети Modbus: перебор адресов 1..247
+     * с заданным таймаутом на каждый запрос.
+     *
+     * Пока идёт поиск, основной polling (чтение ID) останавливается —
+     * они используют один USB-порт и не должны пересекаться.
+     *
+     * @param timeoutMs Таймаут на каждый адрес. 300 мс по умолчанию —
+     *                  компромисс между скоростью перебора (≈74 сек на все
+     *                  247 адресов) и надёжностью обнаружения на 115200.
+     *                  Для других скоростей может понадобиться больше.
+     */
+    fun startSearch(timeoutMs: Int) {
+        // Если поиск уже идёт — не запускаем второй.
+        if (searchJob?.isActive == true) {
+            Log.e("MainViewModel", "startSearch: поиск уже идёт, пропускаю")
+            return
+        }
+
+        // Останавливаем основной polling, чтобы не было конфликта за порт.
+        pollingJob?.cancel()
+        pollingJob = null
+
+        // Сбрасываем предыдущие результаты.
+        foundDevices = emptyList()
+        searchState = SearchState.Running
+        currentSearchAddress = null
+
+        searchJob = viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val found = mutableListOf<FoundDevice>()
+                // Адрес 0 — broadcast, 248..255 зарезервированы. Стандарт: 1..247.
+                for (address in 1..247) {
+                    if (!isActive) break
+
+                    withContext(Dispatchers.Main) {
+                        currentSearchAddress = address
+                    }
+
+                    val id = repository.readDeviceId(
+                        slaveAddr = address,
+                        timeoutMs = timeoutMs.toLong()
+                    )
+
+                    if (id != null) {
+                        Log.e("MainViewModel", "Найдено устройство: адрес=$address, id='$id'")
+                        found.add(FoundDevice(address = address, deviceId = id))
+                        // Обновляем UI по мере нахождения — пользователь видит
+                        // результаты не только после завершения, но и в процессе.
+                        withContext(Dispatchers.Main) {
+                            foundDevices = found.toList()
+                        }
+                    }
+                }
+
+                withContext(Dispatchers.Main) {
+                    searchState = SearchState.Completed
+                    currentSearchAddress = null
+                }
+                Log.e("MainViewModel", "Поиск завершён. Найдено устройств: ${found.size}")
+
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // Отмена — пользователь нажал "Стоп" или экран закрылся.
+                // Переводим в Completed (поиск прекращён), сохраняем уже найденные.
+                withContext(Dispatchers.Main) {
+                    searchState = SearchState.Completed
+                    currentSearchAddress = null
+                }
+                Log.e("MainViewModel", "Поиск отменён. Найдено: ${foundDevices.size}")
+                throw e
+            } catch (e: Exception) {
+                Log.e("MainViewModel", "Ошибка во время поиска: ${e.message}")
+                withContext(Dispatchers.Main) {
+                    searchState = SearchState.Completed
+                    currentSearchAddress = null
+                }
+            } finally {
+                // Возобновляем штатный polling на СТАРОМ адресе,
+                // если поиск завершился и никакое устройство не было выбрано.
+                // Если пользователь выбрал адрес — applyFoundAddress() сам
+                // сделает initializeAndConnect, и polling стартует оттуда.
+                //
+                // Здесь этого не делаем, чтобы не перебить выбор пользователя.
+                // Возобновление делается явно в stopSearch() / applyFoundAddress().
+            }
+        }
+    }
+
+    /**
+     * Останавливает активный поиск (пользователь нажал "Стоп").
+     * Уже найденные устройства сохраняются в [foundDevices].
+     * После остановки возобновляется штатный polling на текущем адресе.
+     */
+    fun stopSearch() {
+        if (searchJob?.isActive == true) {
+            searchJob?.cancel()
+            searchJob = null
+            Log.e("MainViewModel", "stopSearch: поиск отменён пользователем")
+        }
+        // Если поиск шёл и прервался — polling остановлен, надо вернуть.
+        // Но только если сейчас нет поиска и нет подключения к другому адресу.
+        if (isConnected) {
+            startPolling(needReopen = false)
+        }
+    }
+
+    /**
+     * Применяет адрес найденного устройства: переключает всё приложение
+     * на работу с контроллером по этому адресу.
+     *
+     * Вызывается, когда пользователь тапнул по устройству в результатах поиска.
+     * Останавливает поиск (если шёл), обновляет [currentSlaveAddress],
+     * переподключается к контроллеру через [initializeAndConnect].
+     *
+     * @param address Новый адрес slave.
+     * @param usbManager Для переподключения.
+     * @param device     Для переподключения.
+     * @param baudRate   Текущая скорость (не меняется поиском).
+     */
+    fun applyFoundAddress(
+        address: Int,
+        usbManager: UsbManager,
+        device: UsbDevice,
+        baudRate: Int
+    ) {
+        // Останавливаем поиск, если шёл.
+        searchJob?.cancel()
+        searchJob = null
+        searchState = SearchState.Idle
+        currentSearchAddress = null
+
+        // Переподключаемся на выбранный адрес.
+        // shutdown() остановит polling (если шёл) и закроет порт.
+        shutdown()
+        initializeAndConnect(
+            usbManager = usbManager,
+            device = device,
+            baudRate = baudRate,
+            slaveAddress = address
+        )
+    }
+
     fun shutdown() {
         pollingJob?.cancel()
         pollingJob = null
+        searchJob?.cancel()
+        searchJob = null
+        searchState = SearchState.Idle
+        currentSearchAddress = null
         isConnected = false
         deviceId = "Ожидание ответа..."
         repository.close()
     }
 }
+
+/**
+ * Состояние поиска устройств в сети Modbus.
+ */
+enum class SearchState {
+    /** Поиск не запущен или завершён и закрыт. */
+    Idle,
+
+    /** Идёт перебор адресов. */
+    Running,
+
+    /** Поиск завершён — все адреса проверены или пользователь нажал "Стоп". */
+    Completed
+}
+
+/**
+ * Найденное устройство в сети Modbus.
+ *
+ * @property address Адрес slave (1..247), на котором устройство ответило.
+ * @property deviceId Строка идентификатора, полученная от устройства
+ *                    (например, "00000056 DExS.SMFCB v1.10.6.1...").
+ */
+data class FoundDevice(
+    val address: Int,
+    val deviceId: String
+)

@@ -133,13 +133,23 @@ class ModbusRepository {
      *                  может изменить через диалог "Настройки".
      * @return Строка идентификатора, либо null при ошибке.
      */
-    fun readDeviceId(slaveAddr: Int): String? {
+    /**
+     * Отправляет запрос 0x11 (Report Server ID).
+     *
+     * @param slaveAddr Адрес slave в сети Modbus.
+     * @param timeoutMs Таймаут ожидания ответа в миллисекундах.
+     *                  По умолчанию 1500 мс (для штатной работы).
+     *                  Для сканирования сети (лупа) будет передаваться
+     *                  короткий таймаут (например, 300 мс), чтобы
+     *                  перебор 247 адресов не занимал минуты.
+     */
+    fun readDeviceId(slaveAddr: Int, timeoutMs: Long = 1500L): String? {
         val port = usbPort ?: run {
             Log.e("ModbusRepository", "readDeviceId(): usbPort == null")
             return null
         }
 
-        Log.e("ModbusRepository", "readDeviceId(): slave=$slaveAddr, isOpen=${port.isOpen}, dtr=${port.dtr}, rts=${port.rts}")
+        Log.e("ModbusRepository", "readDeviceId(): slave=$slaveAddr, timeout=$timeoutMs, isOpen=${port.isOpen}, dtr=${port.dtr}, rts=${port.rts}")
 
         // Адрес slave теперь приходит параметром — раньше был жёстко 0x01.
         val request = byteArrayOf((slaveAddr and 0xFF).toByte(), 0x11.toByte())
@@ -155,7 +165,6 @@ class ModbusRepository {
             Log.e("ModbusRepository", "Запрос отправлен: ${fullRequest.joinToString(" ") { "%02X".format(it) }}")
 
             val startTime = System.currentTimeMillis()
-            val timeoutMs = 1500L
             val accumulatedData = ByteArrayOutputStream()
             val readBuffer = ByteArray(64)
 

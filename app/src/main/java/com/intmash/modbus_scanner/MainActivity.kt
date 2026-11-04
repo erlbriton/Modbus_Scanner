@@ -18,6 +18,7 @@ import com.intmash.modbus_scanner.ui.MainViewModel
 import com.intmash.modbus_scanner.ui.theme.ModbusIDTheme
 import com.intmash.modbus_scanner.usb.UsbConnectionManager
 import com.intmash.modbus_scanner.data.ConnectionSettings
+import com.intmash.modbus_scanner.ui.FoundDevice
 
 
 class MainActivity : ComponentActivity() {
@@ -98,6 +99,32 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        // Лямбда «пользователь выбрал устройство из результатов поиска»:
+        // сохраняем новый адрес в SharedPreferences, обновляем State
+        // (для рекомпозиции AppNavHost и пересоздания ParametersViewModel),
+        // переподключаемся по новому адресу через MainViewModel.applyFoundAddress.
+        val onApplyAddressHandler: (FoundDevice) -> Unit = { found ->
+            // 1. Сохраняем новый адрес в настройки.
+            connectionSettings.setSlaveAddress(found.address)
+            // 2. Обновляем State — AppNavHost перерисуется, ParametersViewModel
+            //    пересоздастся через key.
+            slaveAddressState = found.address
+            // 3. Переподключаемся к контроллеру по новому адресу.
+            //    applyFoundAddress внутри остановит поиск, сделает shutdown
+            //    и заново initializeAndConnect с новым адресом.
+            val currentDevice = usbManager.deviceList.values.firstOrNull {
+                viewModel.isOurDevice(it)
+            }
+            if (currentDevice != null) {
+                viewModel.applyFoundAddress(
+                    address = found.address,
+                    usbManager = usbManager,
+                    device = currentDevice,
+                    baudRate = connectionSettings.getBaudRate()
+                )
+            }
+        }
+
         setContent {
             ModbusIDTheme {
                 // Чтение State внутри setContent — Compose «подписывается»
@@ -111,6 +138,7 @@ class MainActivity : ComponentActivity() {
                         isVirtualDevice = IS_VIRTUAL_DEVICE,
                         activityContext = this,
                         onSettingsSaved = reconnectWithCurrentSettings,
+                        onApplyAddress = onApplyAddressHandler,
                         slaveAddress = currentSlaveAddress,
                         modifier = Modifier.padding(innerPadding)
                     )

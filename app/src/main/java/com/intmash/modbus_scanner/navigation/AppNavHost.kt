@@ -20,6 +20,7 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.toRoute
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.intmash.modbus_scanner.ui.ConfigScreen
+import com.intmash.modbus_scanner.ui.FoundDevice
 import com.intmash.modbus_scanner.ui.FileBrowserScreen
 import com.intmash.modbus_scanner.ui.MainScreen
 import com.intmash.modbus_scanner.ui.MainViewModel
@@ -40,11 +41,10 @@ fun AppNavHost(
     activityContext: android.content.Context,
     // Колбэк «настройки сохранены».
     onSettingsSaved: () -> Unit = {},
+    // Колбэк «выбрано найденное устройство»: применяет адрес и переподключается.
+    // Реализация — в MainActivity (там есть usbManager и connectionSettings).
+    onApplyAddress: (FoundDevice) -> Unit = {},
     // Адрес slave в сети Modbus, актуальный на момент композиции.
-    // Приходит из MainActivity, читается из ConnectionSettings.
-    // Используется как часть key для ParametersViewModel — при смене
-    // адреса старая VM уничтожается (останавливает опрос на старом адресе),
-    // создаётся новая с новым адресом.
     slaveAddress: Int = 1,
     modifier: Modifier = Modifier,
     navController: NavHostController = rememberNavController()
@@ -89,11 +89,15 @@ fun AppNavHost(
                     }
                 },
                 errorMessage = errorMessage,
-                // Пробрасываем колбэк из MainActivity в MainScreen.
-                // Когда пользователь сохранит настройки в диалоге,
-                // MainScreen вызовет его — а тот уже переподключит порт
-                // с новой скоростью.
-                onSettingsSaved = onSettingsSaved
+                onSettingsSaved = onSettingsSaved,
+
+                // Поиск устройств: состояние из MainViewModel, действия — его методы.
+                searchState = viewModel.searchState,
+                foundDevices = viewModel.foundDevices,
+                currentSearchAddress = viewModel.currentSearchAddress,
+                onStartSearch = { timeoutMs -> viewModel.startSearch(timeoutMs) },
+                onStopSearch = { viewModel.stopSearch() },
+                onApplyAddress = onApplyAddress
             )
         }
 

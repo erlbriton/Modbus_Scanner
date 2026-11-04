@@ -25,6 +25,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -81,6 +82,13 @@ fun ConnectionSettingsDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
+        // containerColor — цвет фона всего диалога.
+        // Примеры:
+        //   Color(0xFFFFFFFF)         — белый
+        //   Color(0xFFF5F5F5)         — очень светлый серый
+        //   Color(0xFFFFF8E1)         — кремовый
+        //   MaterialTheme.colorScheme.surfaceVariant — из темы
+        containerColor = Color(0xFF172843),
         title = { Text("Настройки соединения") },
         text = {
             Column {
