@@ -1,28 +1,41 @@
+// MainScreen.kt
 package com.intmash.modbus_scanner.ui
 
+import android.widget.Toast
 import androidx.compose.foundation.layout.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.intmash.modbus_scanner.data.ConnectionSettings
 
 /**
  * MainScreen — главный экран приложения, который отображается до выбора INI-файла.
  *
- * Аннотация `@Composable` указывает компилятору, что эта функция является строительным блоком
- * пользовательского интерфейса в Jetpack Compose. Composable-функции описывают UI декларативно:
- * они не "изменяют" элементы напрямую при обновлении, а перерисовываются (recomposition) при изменении данных.
+ * Содержит:
+ *  - Идентификатор контроллера (Device ID), полученный по Modbus.
+ *  - Кнопку выбора INI-файла (активна только при наличии связи).
+ *  - Две кнопки-иконки внизу:
+ *      * «Настройки» — открывает диалог выбора скорости и адреса Modbus
+ *        (значения сохраняются в [ConnectionSettings], SharedPreferences).
+ *      * «Поиск» (лупа) — пока заглушка, работа будет описана на следующем шаге.
  *
  * @param deviceId Строка с текущим ID контроллера, полученным по Modbus.
  * @param isConnected Флаг успешности физического подключения к порту.
- * @param isVirtualDevice Флаг режима отладки/виртуального устройства (позволяет обойти проверку связи).
- * @param onSelectFileClick Лямбда-функция (колбэк), которая вызывается при нажатии на кнопку выбора файла.
- * @param errorMessage Текст ошибки (если она возникала при попытке выбрать файл), либо null.
- * @param modifier Модификатор для настройки внешнего вида, отступов и размеров контейнера.
+ * @param isVirtualDevice Флаг режима отладки/виртуального устройства.
+ * @param onSelectFileClick Колбэк нажатия кнопки выбора INI-файла.
+ * @param errorMessage Текст ошибки (если была) при выборе файла, либо null.
+ * @param modifier Модификатор компоновки.
  */
 @Composable
 fun MainScreen(
@@ -33,26 +46,34 @@ fun MainScreen(
     errorMessage: String?,
     modifier: Modifier = Modifier
 ) {
-    // Box — это контейнер, который позволяет накладывать элементы друг на друга
-    // или позиционировать их (в данном случае мы центрируем всё содержимое по центру экрана).
+    // --- Контекст и хранилище настроек ---
+    // LocalContext.current — текущий Context (Activity/MainActivity).
+    // remember — создаём ConnectionSettings один раз за жизнь Composable,
+    // а не при каждой перерисовке (иначе будет лишний доступ к SharedPreferences).
+    val context = LocalContext.current
+    val connectionSettings = remember { ConnectionSettings(context) }
+
+    // Флаг «диалог настроек открыт». rememberSaveable — переживает
+    // поворот экрана (диалог останется открытым при повороте).
+    var showSettingsDialog by rememberSaveable { mutableStateOf(false) }
+
+    // Box — контейнер, центрирующий всё содержимое по центру экрана.
     Box(
         modifier = modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
     ) {
-        // Column — вертикальный контейнер, располагающий дочерние элементы друг под другом (как Linear Layout в вертикальном режиме).
         Column(
-            horizontalAlignment = Alignment.CenterHorizontally, // Выравнивание дочерних элементов по центру по горизонтали
-            verticalArrangement = Arrangement.Center,           // Выравнивание по центру по вертикали
-            modifier = Modifier.padding(16.dp)                  // Внутренние отступы со всех сторон экрана
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+            modifier = Modifier.padding(16.dp)
         ) {
             // Метка-подпись "Device ID:"
             Text(
                 text = "Device ID:",
                 fontSize = 14.sp,
-                color = MaterialTheme.colorScheme.secondary // Цвет из текущей палитры темы Material 3
+                color = MaterialTheme.colorScheme.secondary
             )
 
-            // Spacer — пустой элемент-отступ между текстами
             Spacer(modifier = Modifier.height(4.dp))
 
             // Отображение самого значения Device ID
@@ -63,44 +84,38 @@ fun MainScreen(
                 textAlign = TextAlign.Center
             )
 
-            // Отступ перед разделительной полосой
             Spacer(modifier = Modifier.height(32.dp))
 
-            // Горизонтальная линия-разделитель фиксированной ширины
             HorizontalDivider(modifier = Modifier.width(200.dp))
 
-            // Отступ после разделительной полосы
             Spacer(modifier = Modifier.height(32.dp))
 
             // --- БИЗНЕС-ЛОГИКА И УСЛОВНЫЙ РЕНДЕРИНГ UI ---
 
-            // Проверяем, получен ли реальный ID контроллера (исключая служебные тексты загрузки/ошибок)
+            // Проверяем, получен ли реальный ID контроллера (исключая служебные тексты).
             val isIdReceived = deviceId != "Ожидание ответа..." &&
                     deviceId != "Ошибка подключения к порту" &&
                     isConnected
 
-            // Разрешаем выбор INI-файла либо если устройство виртуальное, либо если получена реальная связь
+            // Разрешаем выбор INI-файла либо если устройство виртуальное,
+            // либо если получена реальная связь.
             val canSelectIni = isVirtualDevice || isIdReceived
 
-            // Условный оператор в Kotlin позволяет динамически менять структуру интерфейса "на лету"
             if (canSelectIni) {
-                // Кнопка выбора файла .ini
                 Button(onClick = onSelectFileClick) {
                     Text("Выберите ini файл", fontSize = 16.sp)
                 }
 
-                // Если передана ошибка выбора файла — показываем её под кнопкой
                 if (errorMessage != null) {
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
                         text = errorMessage,
-                        color = MaterialTheme.colorScheme.error, // Красный цвет ошибки из темы
+                        color = MaterialTheme.colorScheme.error,
                         fontSize = 14.sp,
                         textAlign = TextAlign.Center
                     )
                 }
             } else {
-                // Если связи нет и устройство не виртуальное — блокируем выбор и выводим предупреждение
                 Text(
                     text = "Ожидание ответа от контроллера...\nВыбор INI заблокирован",
                     fontSize = 14.sp,
@@ -108,6 +123,83 @@ fun MainScreen(
                     textAlign = TextAlign.Center
                 )
             }
+
+            // --- Кнопки "Настройки" и "Поиск" ---
+            // Размещены ВСЕГДА, вне if/else: настройки нужны как раз тогда,
+            // когда связи нет — чтобы попробовать другую скорость/адрес.
+            Spacer(modifier = Modifier.height(32.dp))
+
+            // --- Настройки размера и цвета иконок ---
+            // Здесь и только здесь меняются размеры и цвета.
+            // iconGraphicSize — размер самой картинки (шестерёнки/лупы) в dp.
+            // iconTouchSize   — размер круглой зоны нажатия вокруг иконки в dp.
+            //                   Должен быть >= iconGraphicSize (иначе зона нажатия
+            //                   меньше картинки, что неудобно для пальца).
+            //                   Рекомендация Material: минимум 48.dp.
+            // settingsIconColor / searchIconColor — цвета иконок. Любой Color(...).
+            val iconGraphicSize = 52.dp
+            val iconTouchSize = 80.dp
+            val settingsIconColor = Color(0xFF1976D2)  // синий
+            val searchIconColor = Color(0xFF388E3C)    // зелёный
+
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Кнопка "Настройки"
+                IconButton(
+                    onClick = { showSettingsDialog = true },
+                    modifier = Modifier.size(iconTouchSize)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Settings,
+                        contentDescription = "Настройки соединения",
+                        tint = settingsIconColor,
+                        modifier = Modifier.size(iconGraphicSize)
+                    )
+                }
+
+                // Кнопка "Поиск"
+                IconButton(
+                    onClick = { /* TODO: работа поиска */ },
+                    modifier = Modifier.size(iconTouchSize)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Search,
+                        contentDescription = "Поиск",
+                        tint = searchIconColor,
+                        modifier = Modifier.size(iconGraphicSize)
+                    )
+                }
+            }
         }
+    }
+
+    // --- Диалог настроек ---
+    // Открывается по кнопке "Настройки". При подтверждении сохраняет
+    // выбранные значения в SharedPreferences и закрывается.
+    if (showSettingsDialog) {
+        ConnectionSettingsDialog(
+            initialBaudRate = connectionSettings.getBaudRate(),
+            initialSlaveAddress = connectionSettings.getSlaveAddress(),
+            onConfirm = { newBaudRate, newAddress ->
+                // Сохраняем в SharedPreferences.
+                connectionSettings.setBaudRate(newBaudRate)
+                connectionSettings.setSlaveAddress(newAddress)
+                // Закрываем диалог.
+                showSettingsDialog = false
+                // Показываем Toast для обратной связи: пользователь видит,
+                // что настройки применились. Автоматическое переподключение
+                // с новыми параметрами будет отдельным шагом — пока изменения
+                // вступят в силу при следующем физическом переподключении
+                // контроллера или перезапуске приложения.
+                Toast.makeText(
+                    context,
+                    "Сохранено: $newBaudRate бод, адрес $newAddress",
+                    Toast.LENGTH_SHORT
+                ).show()
+            },
+            onDismiss = { showSettingsDialog = false }
+        )
     }
 }
