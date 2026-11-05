@@ -1,5 +1,6 @@
 package com.intmash.modbus_scanner.ui
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -13,10 +14,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.intmash.modbus_scanner.data.PageInfo
+import com.intmash.modbus_scanner.R
 
 /**
  * ConfigScreen — меню страниц параметров, загруженных из выбранного INI-файла.
@@ -152,8 +157,29 @@ fun ConfigScreen(
     if (showAbout) {
         AlertDialog(
             onDismissRequest = closeDialog,
-            title = { Text("О нас") },
-            text = { Text("Компания Интмаш, www.intmash.ru,     тел. 913-909-03-70 ") },
+            //title = { Text("О нас") },
+            text = {
+                // Column — вертикальный контейнер, чтобы картинка была над текстом.
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Image(
+                        painter = painterResource(id = R.drawable.logo_intmash),
+                        contentDescription = null, // декоративная, TalkBack её не озвучивает
+                        // ContentScale.Fit — вписать картинку в размер, не искажая пропорций.
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(96.dp)
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(
+                        text = "Компания Интмаш\nwww.intmash.ru\nтел. 913-009-53-03",
+                        textAlign = TextAlign.Center
+                    )
+                }
+            },
             confirmButton = {
                 TextButton(onClick = closeDialog) {
                     Text("OK")
