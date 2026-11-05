@@ -175,7 +175,7 @@ fun ConfigScreen(
                     )
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(
-                        text = "Компания Интмаш\nwww.intmash.ru\nтел. 913-009-53-03",
+                        text = "Компания Интмаш\nwww.intmash.ru\nтел. 913-009-53-03\nE-mail: support@intmash.ru",
                         textAlign = TextAlign.Center
                     )
                 }
