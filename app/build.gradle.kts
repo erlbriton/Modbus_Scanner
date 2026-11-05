@@ -20,7 +20,10 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // Включаем сжатие кода и удаление неиспользуемых классов (R8)
+            isMinifyEnabled = true
+            // Включаем удаление неиспользуемых ресурсов (картинок, строк)
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

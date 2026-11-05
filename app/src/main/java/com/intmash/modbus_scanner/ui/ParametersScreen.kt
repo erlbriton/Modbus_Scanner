@@ -3,6 +3,7 @@
 package com.intmash.modbus_scanner.ui
 
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -213,6 +214,8 @@ fun ParametersScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .combinedClickable(
+                                    interactionSource = null,
+                                    indication = LocalIndication.current,
                                     onClick = {
                                         //  Log.e("TAP_TEST", "onClick: ${param.key} ${param.name}")
                                         selectedKey = if (isSelected) null else param.key
@@ -302,7 +305,11 @@ fun ParametersScreen(
                                                     color = bitBorderColor
                                                 )
                                                 .background(color = bitFillColor)
-                                                .clickable(enabled = modbusParam != null) {
+                                                .clickable(
+                                                    interactionSource = null,
+                                                    indication = LocalIndication.current,
+                                                    enabled = modbusParam != null
+                                                ) {
                                                     val mp = modbusParam ?: return@clickable
                                                     // Тап по квадратику — запись противоположного значения
                                                     // БЕЗ открытия диалога. Это удобнее, чем каждый раз

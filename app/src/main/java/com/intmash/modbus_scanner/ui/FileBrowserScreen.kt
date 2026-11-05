@@ -1,5 +1,6 @@
 package com.intmash.modbus_scanner.ui
 
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -91,7 +92,10 @@ fun FileBrowserScreen(
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable {
+                        .clickable(
+                            interactionSource = null,
+                            indication = LocalIndication.current
+                        ) {
                             if (file.isDirectory) {
                                 currentDir = file
                             } else if (file.name.endsWith(".ini", ignoreCase = true)) {
